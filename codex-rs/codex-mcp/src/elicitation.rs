@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use crate::McpConfig;
+use crate::local_actor_approvals::LocalActorApproval;
 use crate::mcp::McpPermissionPromptAutoApproveContext;
 use crate::mcp::mcp_permission_prompt_is_auto_approved;
 use anyhow::Context;
@@ -139,13 +140,18 @@ impl ElicitationRequestRouter {
         id: RequestId,
         response: ElicitationResponse,
     ) -> Result<()> {
-        let responder = self
+        let pending = self
             .requests
             .lock()
             .map_err(|_| anyhow!("elicitation request router unavailable"))?
             .remove(&(server_name, id))
             .ok_or_else(|| anyhow!("elicitation request not found"))?;
-        responder
+        let response = match pending.local_actor_approval.as_ref() {
+            Some(approval) => approval.record_response(response),
+            None => response,
+        };
+        pending
+            .responder
             .send(response)
             .map_err(|e| anyhow!("failed to send elicitation response: {e:?}"))
     }
@@ -305,6 +311,9 @@ impl ElicitationRequestManager {
                     Some(_) => return Ok(strict_auto_review_decline()),
                 }
 
+                let local_actor_approval =
+                    LocalActorApproval::from_elicitation(&config, &server_name, &elicitation);
+
                 let permission_prompt_is_auto_approved = mcp_permission_prompt_is_auto_approved(
                     approval_policy,
                     permission_profile,
@@ -358,6 +367,13 @@ impl ElicitationRequestManager {
                             return Ok(response);
                         }
                     }
+                }
+
+                if let Some(response) = local_actor_approval
+                    .as_ref()
+                    .and_then(LocalActorApproval::persisted_response)
+                {
+                    return Ok(response);
                 }
 
                 let Some(tx_event) = tx_event else {
@@ -434,7 +450,13 @@ impl ElicitationRequestManager {
                     .requests
                     .lock()
                     .map_err(|_| anyhow!("elicitation request router unavailable"))?
-                    .insert(request_key.clone(), tx);
+                    .insert(
+                        request_key.clone(),
+                        ElicitationResponder {
+                            responder: tx,
+                            local_actor_approval,
+                        },
+                    );
                 let _pending_request = PendingElicitationRequest {
                     router: router.clone(),
                     key: request_key,
@@ -478,7 +500,12 @@ pub(crate) fn elicitation_is_rejected_by_policy(approval_policy: AskForApproval)
     }
 }
 
-type ResponderMap = HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>;
+struct ElicitationResponder {
+    responder: oneshot::Sender<ElicitationResponse>,
+    local_actor_approval: Option<LocalActorApproval>,
+}
+
+type ResponderMap = HashMap<(String, RequestId), ElicitationResponder>;
 
 fn can_auto_accept_elicitation(elicitation: &Elicitation) -> bool {
     match elicitation {

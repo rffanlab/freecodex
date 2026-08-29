@@ -2,7 +2,7 @@
 
 ## 当前分支实施状态
 
-OpenCodex 的 `freecodex` 分支已经完成前两个阶段的最小落地：
+OpenCodex 的 `freecodex` 分支已经完成前三个阶段的本机落地：
 
 - 保留现有协议名称 `ApprovedForSession` / `AcceptForSession`，避免破坏现有客户端兼容性。
 - 用户选择该范围后，Core 除了写入当前会话内存缓存，还会把规范化后的精确授权键写到 `$CODEX_HOME/approvals/tool/`。
@@ -11,8 +11,12 @@ OpenCodex 的 `freecodex` 分支已经完成前两个阶段的最小落地：
 - `Approved`（仅本次）不会落盘；拒绝、超时和取消不会落盘；管理员要求、沙箱策略和其他拒绝链路仍然优先执行。
 - `request_permissions` 返回 `Session` 范围时，规范化后的动态网络/文件权限会写到 `$CODEX_HOME/approvals/permissions/`，其他本机会话在相同执行环境、cwd 和 workspace roots 下可直接复用。
 - 动态权限每次仍与当前权限配置合并，持久授权不会绕过托管 deny、不可升级路径或 `strict_auto_review` 对 Session 授权的禁止。
+- Browser、Chrome（包括通过 Browser / Computer Use 操作 Edge）和 Computer Use 的官方本地 actor 确认现在会生成精确授权键，并写到 `$CODEX_HOME/approvals/local-actors/`。
+- actor 授权键绑定官方插件 ID、connector、tool name 与规范化后的完整 `tool_params`；不同网页 Origin、账号、应用或操作参数不会互相复用。
+- actor 明确支持 `persist = "always"` 时，普通接受或 session 接受会自动提升为 always，让 actor 自己的偏好存储也同步生效。
+- actor 没有提供 always 能力的确认仍可按完全相同的操作参数由 OpenCodex 本地缓存复用，但 `strict_auto_review`、非确认表单、非官方插件和托管持久化禁令不会进入该缓存。
 
-为了兼容现有桌面客户端，OpenCodex 暂时复用协议中的 `Session` 名称，将它实现为“本机同一精确环境范围可持续复用”；没有新增会导致旧客户端不认识的枚举值。Browser / Computer Use actor、授权查看与撤销 API 仍属于后续阶段。
+为了兼容现有桌面客户端，OpenCodex 暂时复用协议中的 `Session` 名称，将它实现为“本机同一精确环境范围可持续复用”；没有新增会导致旧客户端不认识的枚举值。授权查看与撤销 API 仍属于后续阶段，云端和跨设备同步不在本阶段范围内。
 
 ## 目标
 
@@ -33,9 +37,9 @@ OpenCodex 的 `freecodex` 分支已经完成前两个阶段的最小落地：
 | 网络访问 | 单次、session、具体 host 规则 | 支持具体 host | 写入 `$CODEX_HOME/rules/default.rules` |
 | 文件修改 | 单次或 session | 不支持 | 仅内存 `ApprovalStore` |
 | `request_permissions` | turn 或 session | OpenCodex 已支持 | `$CODEX_HOME/approvals/permissions/` 下的精确环境授权 |
-| Browser Use Origin | 由桌面浏览器组件管理 | Rust Core 不负责持久化 | 本仓库只暴露策略与管理约束 |
-| Computer Use 应用 | 由桌面组件管理 | Rust Core 不负责持久化 | 本仓库只暴露应用策略与管理约束 |
-| 浏览器发布/发送确认 | 模型目录下发给 actor | 本地 Core 无统一覆盖 | `confirmation_policies` 元数据 |
+| Browser Use / Chrome Origin | actor + OpenCodex MCP 路由 | OpenCodex 已支持 | actor 原生偏好 + `$CODEX_HOME/approvals/local-actors/` |
+| Computer Use 应用 | actor + OpenCodex MCP 路由 | OpenCodex 已支持 | actor 原生偏好 + `$CODEX_HOME/approvals/local-actors/` |
+| 浏览器发布/发送确认 | 模型目录下发给 actor | 精确相同参数可复用 | `$CODEX_HOME/approvals/local-actors/`；strict auto-review 除外 |
 
 ### 通用审批缓存每次 Session 都是空的
 
@@ -267,12 +271,19 @@ accept + scope + normalized grant descriptor
 
 本阶段没有扩大单个文件修改审批的范围：第一阶段已经按既有精确文件键持久化 `AcceptForSession`。后续若要支持“整个规范化目录”授权，应当新增显式范围和撤销界面，不能把一次文件确认静默扩大为目录权限。
 
-### 第三阶段：Browser / Computer Use
+### 第三阶段：Browser / Chrome / Computer Use（已实现）
 
-1. 给 actor 传递不可伪造的授权 ID 或已匹配授权描述。
-2. Browser Use 按 Origin + action + account 匹配。
-3. Computer Use 按应用身份 + action 匹配。
-4. actor 的 confirmation policy 在命中有效用户授权时跳过重复确认；组织强制确认仍保留。
+本分支已完成：
+
+1. 在 `codex-mcp` elicitation 路由中只信任 `browser@openai-bundled`、`chrome@openai-bundled` 和 `computer-use@openai-bundled` 三个本地插件身份；同名自定义 MCP、远程插件和开发插件不能借此自动获批。
+2. 只缓存 `codex_approval_kind = "mcp_tool_call"` 且 schema 不要求用户填写字段的确认；登录挑战、验证码、表单输入和 URL elicitation 不缓存。
+3. 按 `plugin_id + connector_id + tool_name + canonical(tool_params)` 生成精确键，并写入 `$CODEX_HOME/approvals/local-actors/`。JSON 对象键会递归排序，确保不同会话对相同参数得到相同授权键。
+4. 新会话命中精确键时直接向 actor 返回 accept，不再向 CLI、TUI 或 App Server 客户端发出重复确认事件。
+5. actor 声明支持 `always` 时，用户的接受响应会携带 `persist = "always"`，使 Browser / Computer Use 自己的 Origin、文件传输、CDP 或应用偏好同步长期保存。
+6. 拒绝、取消、需要表单输入的请求、`strict_auto_review`、审批策略明确禁止 elicitation，以及托管配置禁止持久授权时都不会写入或使用本地 actor 授权。
+7. Browser 托管策略中任一全局、默认 Origin 或单独 Origin 明确设置 `persistent_approval = false` 时，本实现保守地关闭该 actor 的 OpenCodex 持久缓存，避免跨 Origin 误绕过管理限制。
+
+这一阶段不改动闭源 Browser / Chrome / Computer Use 插件源码，也不处理云端。对于模型/组织标记为 `strict_auto_review` 的发布、发送、交易等操作，仍执行强制审查；普通 action-time 确认只有在完整操作参数相同的情况下才会复用，内容、账号、Origin 或目标变化都会重新确认。
 
 ### 第四阶段：授权管理与同步
 
@@ -315,6 +326,8 @@ accept + scope + normalized grant descriptor
 
 用户要求的“授权一次，所有会话不再重复确认”在产品逻辑上是可实现的，但当前仓库只实现了若干互不统一的局部持久化能力。
 
-正确的改造不是全局关闭确认，也不是统一把所有工具设为 `approve`，而是建立一个跨 Session 的、范围明确、可撤销、可过期且服从管理员上限的 `PersistentApprovalStore`，并让 MCP、命令、网络、文件权限以及 Browser/Computer Use 在提示前统一查询它。
+本分支目前已经让 MCP、命令/文件工具缓存、动态权限以及 Browser/Chrome/Computer Use 的精确本地授权跨 Session 复用。它没有全局关闭确认，也没有把所有工具统一设为 `approve`：不同操作参数仍隔离，管理员限制和严格自动审查仍优先。
+
+尚未完成的是统一的授权 list/revoke API、桌面授权管理页、过期策略和跨设备云端同步。当前本机 actor 授权可通过删除 `$CODEX_HOME/approvals/local-actors/` 中对应文件撤销；正式产品界面应在第四阶段补齐。
 
 官方 OpenAI 文档建议为外部写入、破坏性或扩展范围的操作明确设置授权边界。持久授权应当把这个边界编码成可验证的数据，而不是仅依赖对话文本：<https://developers.openai.com/api/docs/guides/latest-model#define-autonomy-and-approval-boundaries>。

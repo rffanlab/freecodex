@@ -1,6 +1,22 @@
 use super::*;
+use crate::McpPluginAttribution;
+use crate::McpServerRegistration;
 use crate::mcp::tests::test_elicitation_config;
+use crate::mcp::tests::test_mcp_config;
 use async_channel::Receiver;
+use codex_config::BrowserUseRequirementsToml;
+use codex_config::ComputerUseRequirementsToml;
+use codex_config::ConfigLayerStack;
+use codex_config::ConfigRequirements;
+use codex_config::ConfigRequirementsToml;
+use codex_config::Constrained;
+use codex_protocol::mcp_approval_meta::APPROVAL_KIND_MCP_TOOL_CALL;
+use codex_protocol::mcp_approval_meta::CONNECTOR_ID_KEY;
+use codex_protocol::mcp_approval_meta::PERSIST_ALWAYS;
+use codex_protocol::mcp_approval_meta::PERSIST_KEY;
+use codex_protocol::mcp_approval_meta::PERSIST_SESSION;
+use codex_protocol::mcp_approval_meta::TOOL_NAME_KEY;
+use codex_protocol::mcp_approval_meta::TOOL_PARAMS_KEY;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::GranularApprovalConfig;
 use pretty_assertions::assert_eq;
@@ -9,6 +25,7 @@ use rmcp::model::ElicitationSchema;
 use rmcp::model::RequestMetaObject;
 use serde_json::Map;
 use serde_json::json;
+use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -397,4 +414,281 @@ async fn reused_elicitation_senders_follow_each_servers_latest_permission_author
         send_elicitation(&hosted, /*marker*/ None).await.action,
         ElicitationAction::Decline
     );
+}
+
+async fn resolve_plugin_elicitation(
+    plugin_id: &str,
+    advertised_persistence: Value,
+    response: ElicitationResponse,
+    requirements_toml: ConfigRequirementsToml,
+) -> ElicitationResponse {
+    let server_name = "local-actor";
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = local_actor_config(plugin_id, codex_home.path(), requirements_toml);
+    let manager = ElicitationRequestManager::new(
+        config,
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        ElicitationRequestRouter::default(),
+    );
+    let (tx_event, events) = async_channel::bounded(1);
+    let sender = manager.make_sender(server_name.to_string(), Some(tx_event));
+    let elicitation = local_actor_elicitation(advertised_persistence);
+    let pending = tokio::spawn(async move {
+        sender(RequestId::Number(7), elicitation)
+            .await
+            .expect("elicitation should resolve")
+    });
+    let event = events.recv().await.expect("elicitation event");
+    let EventMsg::ElicitationRequest(request) = event.msg else {
+        panic!("expected elicitation request event");
+    };
+    let routed_request_id = match request.id {
+        ProtocolRequestId::String(value) => RequestId::String(value.into()),
+        ProtocolRequestId::Integer(value) => RequestId::Number(value),
+    };
+    manager
+        .router
+        .resolve(server_name.to_string(), routed_request_id, response)
+        .await
+        .expect("elicitation response should route");
+    pending.await.expect("elicitation task should finish")
+}
+
+fn local_actor_config(
+    plugin_id: &str,
+    codex_home: &Path,
+    requirements_toml: ConfigRequirementsToml,
+) -> Arc<McpConfig> {
+    let server_name = "local-actor";
+    let mut config = test_mcp_config(codex_home.to_path_buf());
+    config.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    config.permission_profile = PermissionProfile::Disabled;
+    config
+        .server_permission_profiles
+        .insert(server_name.to_string(), PermissionProfile::Disabled);
+    config.config_layer_stack =
+        ConfigLayerStack::new(Vec::new(), ConfigRequirements::default(), requirements_toml)
+            .expect("empty config stack should be valid");
+    let mut catalog = crate::ResolvedMcpCatalog::builder();
+    catalog.register(McpServerRegistration::from_plugin(
+        server_name.to_string(),
+        McpPluginAttribution::new(plugin_id.to_string(), plugin_id.to_string()),
+        /*plugin_order*/ 0,
+        crate::codex_apps_mcp_server_config(
+            "https://example.com",
+            /*apps_mcp_product_sku*/ None,
+            /*originator*/ None,
+        ),
+    ));
+    config.mcp_server_catalog = catalog.build();
+    Arc::new(config)
+}
+
+fn local_actor_elicitation(advertised_persistence: Value) -> Elicitation {
+    Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+        meta: Some(RequestMetaObject::from(Map::from_iter([
+            (APPROVAL_KIND_KEY.into(), json!(APPROVAL_KIND_MCP_TOOL_CALL)),
+            (CONNECTOR_ID_KEY.into(), json!("browser-use")),
+            (TOOL_NAME_KEY.into(), json!("publish_post")),
+            (
+                TOOL_PARAMS_KEY.into(),
+                json!({ "origin": "https://example.com", "account": "business" }),
+            ),
+            (PERSIST_KEY.into(), advertised_persistence),
+        ]))),
+        message: "Allow this local actor operation?".to_string(),
+        requested_schema: ElicitationSchema::builder().build().unwrap(),
+    })
+}
+
+#[tokio::test]
+async fn bundled_local_actor_acceptance_is_promoted_to_always_persist() {
+    for plugin_id in [
+        "browser@openai-bundled",
+        "chrome@openai-bundled",
+        "computer-use@openai-bundled",
+    ] {
+        let response = resolve_plugin_elicitation(
+            plugin_id,
+            json!([PERSIST_SESSION, PERSIST_ALWAYS]),
+            ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(json!({})),
+                meta: Some(json!({ PERSIST_KEY: PERSIST_SESSION })),
+            },
+            ConfigRequirementsToml::default(),
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(json!({})),
+                meta: Some(json!({ PERSIST_KEY: PERSIST_ALWAYS })),
+            },
+            "plugin {plugin_id} should persist accepted approvals"
+        );
+    }
+}
+
+#[tokio::test]
+async fn actor_level_always_promotion_requires_trusted_plugin_and_advertised_support() {
+    for (plugin_id, advertised_persistence) in [
+        ("browser@openai-curated-remote", json!(PERSIST_ALWAYS)),
+        ("untrusted@openai-bundled", json!(PERSIST_ALWAYS)),
+        ("browser@openai-bundled", json!(PERSIST_SESSION)),
+    ] {
+        let response = ElicitationResponse {
+            action: ElicitationAction::Accept,
+            content: Some(json!({})),
+            meta: None,
+        };
+        assert_eq!(
+            resolve_plugin_elicitation(
+                plugin_id,
+                advertised_persistence,
+                response.clone(),
+                ConfigRequirementsToml::default(),
+            )
+            .await,
+            response,
+        );
+    }
+}
+
+#[tokio::test]
+async fn managed_requirements_can_disable_local_actor_persistence() {
+    for (plugin_id, requirements_toml) in [
+        (
+            "browser@openai-bundled",
+            ConfigRequirementsToml {
+                browser_use: Some(BrowserUseRequirementsToml {
+                    allow_global_persistent_approval: Some(false),
+                    ..BrowserUseRequirementsToml::default()
+                }),
+                ..ConfigRequirementsToml::default()
+            },
+        ),
+        (
+            "computer-use@openai-bundled",
+            ConfigRequirementsToml {
+                computer_use: Some(ComputerUseRequirementsToml {
+                    allow_persistent_approval: Some(false),
+                    ..ComputerUseRequirementsToml::default()
+                }),
+                ..ConfigRequirementsToml::default()
+            },
+        ),
+    ] {
+        let response = ElicitationResponse {
+            action: ElicitationAction::Accept,
+            content: Some(json!({})),
+            meta: None,
+        };
+        assert_eq!(
+            resolve_plugin_elicitation(
+                plugin_id,
+                json!(PERSIST_ALWAYS),
+                response.clone(),
+                requirements_toml,
+            )
+            .await,
+            response,
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_actor_declines_are_never_persisted() {
+    let response = ElicitationResponse {
+        action: ElicitationAction::Decline,
+        content: None,
+        meta: None,
+    };
+    assert_eq!(
+        resolve_plugin_elicitation(
+            "browser@openai-bundled",
+            json!(PERSIST_ALWAYS),
+            response.clone(),
+            ConfigRequirementsToml::default(),
+        )
+        .await,
+        response,
+    );
+}
+
+#[tokio::test]
+async fn accepted_local_actor_operation_is_reused_without_a_second_event() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = local_actor_config(
+        "browser@openai-bundled",
+        codex_home.path(),
+        ConfigRequirementsToml::default(),
+    );
+
+    let first_manager = ElicitationRequestManager::new(
+        config.clone(),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        ElicitationRequestRouter::default(),
+    );
+    let (first_tx_event, first_events) = async_channel::bounded(1);
+    let first_sender = first_manager.make_sender("local-actor".to_string(), Some(first_tx_event));
+    let first_pending = tokio::spawn(async move {
+        first_sender(
+            RequestId::Number(1),
+            local_actor_elicitation(json!(PERSIST_ALWAYS)),
+        )
+        .await
+        .expect("first elicitation should resolve")
+    });
+    let first_event = first_events.recv().await.expect("first elicitation event");
+    let EventMsg::ElicitationRequest(first_request) = first_event.msg else {
+        panic!("expected first elicitation request event");
+    };
+    let first_request_id = match first_request.id {
+        ProtocolRequestId::String(value) => RequestId::String(value.into()),
+        ProtocolRequestId::Integer(value) => RequestId::Number(value),
+    };
+    first_manager
+        .router
+        .resolve(
+            "local-actor".to_string(),
+            first_request_id,
+            ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(json!({})),
+                meta: None,
+            },
+        )
+        .await
+        .expect("first response should route");
+    assert_eq!(
+        first_pending
+            .await
+            .expect("first task should finish")
+            .action,
+        ElicitationAction::Accept
+    );
+
+    let second_manager = ElicitationRequestManager::new(
+        config,
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        ElicitationRequestRouter::default(),
+    );
+    let (second_tx_event, second_events) = async_channel::bounded(1);
+    let second_sender =
+        second_manager.make_sender("local-actor".to_string(), Some(second_tx_event));
+    let second_response = second_sender(
+        RequestId::Number(2),
+        local_actor_elicitation(json!(PERSIST_ALWAYS)),
+    )
+    .await
+    .expect("second elicitation should use persisted approval");
+
+    assert_eq!(second_response.action, ElicitationAction::Accept);
+    assert!(second_events.is_empty());
 }

@@ -103,6 +103,7 @@ pub(crate) mod codex_apps;
 pub(crate) mod connection_manager;
 pub(crate) mod elicitation;
 mod executor_environment_http_client;
+mod local_actor_approvals;
 pub(crate) mod mcp;
 mod openai_docs_source_attribution;
 mod pagination;
