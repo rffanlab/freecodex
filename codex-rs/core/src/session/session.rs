@@ -1400,6 +1400,10 @@ impl Session {
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
                 tool_approvals: Mutex::new(ApprovalStore::persistent(config.codex_home.as_path())),
+                persistent_permissions:
+                    crate::tools::persistent_permissions::PersistentPermissionStore::persistent(
+                        config.codex_home.as_path(),
+                    ),
                 guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
                 runtime_handle: tokio::runtime::Handle::current(),
                 skills_service,

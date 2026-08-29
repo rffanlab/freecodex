@@ -6368,6 +6368,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
         tool_approvals: Mutex::new(ApprovalStore::default()),
+        persistent_permissions: Default::default(),
         guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
         runtime_handle: tokio::runtime::Handle::current(),
         skills_service,
@@ -6922,7 +6923,12 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
 
 #[tokio::test]
 async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
-    let (session, _turn_context) = make_session_and_context().await;
+    let (session, turn_context) = make_session_and_context().await;
+    let environment = turn_context
+        .environments
+        .primary()
+        .expect("primary environment")
+        .selection();
     let originating_active_turn = ActiveTurn::default();
     let originating_turn_state = Arc::clone(&originating_active_turn.turn_state);
     *session.active_turn.lock().await = Some(originating_active_turn);
@@ -6944,7 +6950,7 @@ async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
                 scope: PermissionGrantScope::Turn,
                 strict_auto_review: false,
             },
-            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            &environment,
             Some(&originating_turn_state),
         )
         .await;
@@ -6973,7 +6979,14 @@ async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
 
 #[tokio::test]
 async fn request_permission_grants_are_environment_keyed() {
-    let (session, _turn_context) = make_session_and_context().await;
+    let (session, turn_context) = make_session_and_context().await;
+    let local_environment = turn_context
+        .environments
+        .primary()
+        .expect("primary environment")
+        .selection();
+    let mut remote_environment = local_environment.clone();
+    remote_environment.environment_id = "remote".to_string();
     let originating_active_turn = ActiveTurn::default();
     let originating_turn_state = Arc::clone(&originating_active_turn.turn_state);
     *session.active_turn.lock().await = Some(originating_active_turn);
@@ -6991,7 +7004,7 @@ async fn request_permission_grants_are_environment_keyed() {
                 scope: PermissionGrantScope::Turn,
                 strict_auto_review: false,
             },
-            "remote",
+            &remote_environment,
             Some(&originating_turn_state),
         )
         .await;
@@ -7012,21 +7025,33 @@ async fn request_permission_grants_are_environment_keyed() {
                 scope: PermissionGrantScope::Session,
                 strict_auto_review: false,
             },
-            "remote",
+            &remote_environment,
             /*originating_turn_state*/ None,
         )
         .await;
 
     assert_eq!(
-        session.granted_session_permissions("remote").await,
+        session
+            .granted_session_permissions(&remote_environment)
+            .await,
         Some(requested_permissions.into())
     );
-    assert_eq!(session.granted_session_permissions("local").await, None);
+    assert_eq!(
+        session
+            .granted_session_permissions(&local_environment)
+            .await,
+        None
+    );
 }
 
 #[tokio::test]
 async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
-    let (session, _turn_context) = make_session_and_context().await;
+    let (session, turn_context) = make_session_and_context().await;
+    let environment = turn_context
+        .environments
+        .primary()
+        .expect("primary environment")
+        .selection();
     let originating_active_turn = ActiveTurn::default();
     let originating_turn_state = Arc::clone(&originating_active_turn.turn_state);
     *session.active_turn.lock().await = Some(originating_active_turn);
@@ -7044,7 +7069,7 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
                 scope: PermissionGrantScope::Turn,
                 strict_auto_review: true,
             },
-            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            &environment,
             Some(&originating_turn_state),
         )
         .await;
@@ -7440,10 +7465,13 @@ async fn request_permissions_response_materializes_session_cwd_grants_before_rec
         .expect("request_permissions join error");
 
     assert_eq!(response, Some(expected_response));
+    let environment = turn_context
+        .environments
+        .primary()
+        .expect("primary environment")
+        .selection();
     assert_eq!(
-        session
-            .granted_session_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID)
-            .await,
+        session.granted_session_permissions(&environment).await,
         Some(expected_permissions.into())
     );
 }
@@ -8647,6 +8675,7 @@ where
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
         tool_approvals: Mutex::new(ApprovalStore::default()),
+        persistent_permissions: Default::default(),
         guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
         runtime_handle: tokio::runtime::Handle::current(),
         skills_service,

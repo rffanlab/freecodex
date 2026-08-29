@@ -624,6 +624,11 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_s
     let active_turn = crate::state::ActiveTurn::default();
     let originating_turn_state = Arc::clone(&active_turn.turn_state);
     *session.active_turn.lock().await = Some(active_turn);
+    let environment = turn_context_raw
+        .environments
+        .primary()
+        .expect("primary environment")
+        .selection();
     session
         .record_granted_request_permissions_for_turn(
             &RequestPermissionsResponse {
@@ -636,7 +641,7 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_s
                 scope: PermissionGrantScope::Turn,
                 strict_auto_review: true,
             },
-            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            &environment,
             Some(&originating_turn_state),
         )
         .await;

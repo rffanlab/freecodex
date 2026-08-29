@@ -255,7 +255,7 @@ pub(super) fn implicit_granted_permissions(
 
 pub(super) async fn apply_granted_turn_permissions(
     session: &Session,
-    environment_id: &str,
+    environment: &crate::session::turn_context::TurnEnvironment,
     cwd: &Path,
     sandbox_permissions: SandboxPermissions,
     additional_permissions: Option<AdditionalPermissionProfile>,
@@ -268,8 +268,12 @@ pub(super) async fn apply_granted_turn_permissions(
         };
     }
 
-    let granted_session_permissions = session.granted_session_permissions(environment_id).await;
-    let granted_turn_permissions = session.granted_turn_permissions(environment_id).await;
+    let granted_session_permissions = session
+        .granted_session_permissions(&environment.selection)
+        .await;
+    let granted_turn_permissions = session
+        .granted_turn_permissions(&environment.selection.environment_id)
+        .await;
     let granted_permissions = merge_permission_profiles(
         granted_session_permissions.as_ref(),
         granted_turn_permissions.as_ref(),

@@ -293,7 +293,7 @@ async fn effective_patch_permissions(
     let native_cwd = cwd.to_abs_path()?;
     let granted_permissions = merge_permission_profiles(
         session
-            .granted_session_permissions(environment_id)
+            .granted_session_permissions(&environment.selection)
             .await
             .as_ref(),
         session
@@ -314,7 +314,7 @@ async fn effective_patch_permissions(
         .collect::<Result<Vec<_>, _>>()?;
     let effective_additional_permissions = apply_granted_turn_permissions(
         session,
-        environment_id,
+        environment,
         native_cwd.as_path(),
         crate::sandboxing::SandboxPermissions::UseDefault,
         write_permissions_for_paths(&native_file_paths, &file_system_sandbox_policy, &native_cwd),

@@ -2759,7 +2759,7 @@ impl Session {
             );
             self.record_granted_request_permissions_for_turn(
                 &response,
-                &environment.environment_id,
+                &environment,
                 originating_turn_state.as_ref(),
             )
             .await;
@@ -2929,7 +2929,7 @@ impl Session {
                 };
                 self.record_granted_request_permissions_for_turn(
                     &response,
-                    &entry.environment.environment_id,
+                    &entry.environment,
                     originating_turn_state.as_ref(),
                 )
                 .await;
@@ -2973,7 +2973,7 @@ impl Session {
     async fn record_granted_request_permissions_for_turn(
         &self,
         response: &RequestPermissionsResponse,
-        environment_id: &str,
+        environment: &TurnEnvironmentSelection,
         originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
     ) {
         if response.permissions.is_empty() {
@@ -2985,18 +2985,20 @@ impl Session {
                     let mut ts = turn_state.lock().await;
                     let permissions: AdditionalPermissionProfile =
                         response.permissions.clone().into();
-                    ts.record_granted_permissions(environment_id, permissions);
+                    ts.record_granted_permissions(&environment.environment_id, permissions);
                     if response.strict_auto_review {
                         ts.enable_strict_auto_review();
                     }
                 }
             }
             PermissionGrantScope::Session => {
+                let permissions: AdditionalPermissionProfile = response.permissions.clone().into();
                 let mut state = self.state.lock().await;
-                state.record_granted_permissions(
-                    environment_id,
-                    response.permissions.clone().into(),
-                );
+                state.record_granted_permissions(&environment.environment_id, permissions.clone());
+                drop(state);
+                self.services
+                    .persistent_permissions
+                    .grant(environment, permissions);
             }
         }
     }
@@ -3033,10 +3035,16 @@ impl Session {
 
     pub(crate) async fn granted_session_permissions(
         &self,
-        environment_id: &str,
+        environment: &TurnEnvironmentSelection,
     ) -> Option<AdditionalPermissionProfile> {
         let state = self.state.lock().await;
-        state.granted_permissions(environment_id)
+        let session_permissions = state.granted_permissions(&environment.environment_id);
+        drop(state);
+        let persistent_permissions = self.services.persistent_permissions.granted(environment);
+        codex_sandboxing::policy_transforms::merge_permission_profiles(
+            session_permissions.as_ref(),
+            persistent_permissions.as_ref(),
+        )
     }
 
     #[expect(

@@ -2,15 +2,17 @@
 
 ## 当前分支实施状态
 
-`freecodex` 分支已经完成第一阶段的最小落地：
+OpenCodex 的 `freecodex` 分支已经完成前两个阶段的最小落地：
 
 - 保留现有协议名称 `ApprovedForSession` / `AcceptForSession`，避免破坏现有客户端兼容性。
 - 用户选择该范围后，Core 除了写入当前会话内存缓存，还会把规范化后的精确授权键写到 `$CODEX_HOME/approvals/tool/`。
 - 每个授权键使用独立 JSON 文件并原子写入；新建、恢复、并行会话和应用重启后，都可以读取同一授权。
 - 文件修改仍按 `environment_id + path` 精确匹配；命令仍包含环境、命令、工作目录、TTY、沙箱和附加权限；MCP 仍按 server、connector 和 tool 匹配。不同账号、工具、命令或路径不会因为已有授权被扩大放行。
 - `Approved`（仅本次）不会落盘；拒绝、超时和取消不会落盘；管理员要求、沙箱策略和其他拒绝链路仍然优先执行。
+- `request_permissions` 返回 `Session` 范围时，规范化后的动态网络/文件权限会写到 `$CODEX_HOME/approvals/permissions/`，其他本机会话在相同执行环境、cwd 和 workspace roots 下可直接复用。
+- 动态权限每次仍与当前权限配置合并，持久授权不会绕过托管 deny、不可升级路径或 `strict_auto_review` 对 Session 授权的禁止。
 
-这是兼容现有桌面客户端的第一阶段，不等于所有操作类型已经接入。Browser / Computer Use actor、`request_permissions` 的全局范围、授权查看与撤销 API 仍属于后续阶段。
+为了兼容现有桌面客户端，OpenCodex 暂时复用协议中的 `Session` 名称，将它实现为“本机同一精确环境范围可持续复用”；没有新增会导致旧客户端不认识的枚举值。Browser / Computer Use actor、授权查看与撤销 API 仍属于后续阶段。
 
 ## 目标
 
@@ -30,7 +32,7 @@
 | shell 命令 | 单次、session、命令前缀规则 | 支持特定前缀 | 写入 `$CODEX_HOME/rules/default.rules` |
 | 网络访问 | 单次、session、具体 host 规则 | 支持具体 host | 写入 `$CODEX_HOME/rules/default.rules` |
 | 文件修改 | 单次或 session | 不支持 | 仅内存 `ApprovalStore` |
-| `request_permissions` | turn 或 session | 不支持 | 仅会话状态 |
+| `request_permissions` | turn 或 session | OpenCodex 已支持 | `$CODEX_HOME/approvals/permissions/` 下的精确环境授权 |
 | Browser Use Origin | 由桌面浏览器组件管理 | Rust Core 不负责持久化 | 本仓库只暴露策略与管理约束 |
 | Computer Use 应用 | 由桌面组件管理 | Rust Core 不负责持久化 | 本仓库只暴露应用策略与管理约束 |
 | 浏览器发布/发送确认 | 模型目录下发给 actor | 本地 Core 无统一覆盖 | `confirmation_policies` 元数据 |
@@ -60,7 +62,7 @@ App Server 协议的文件审批只有：
 
 文件审批缓存键是 `environment_id + path`，见 `codex-rs/core/src/tools/approvals.rs:252-265`，但该键只进入当前 Session 的内存缓存。
 
-### 动态权限最多保存到 Session
+### 动态权限的上游实现最多保存到 Session
 
 `PermissionGrantScope` 只有：
 
@@ -71,7 +73,7 @@ Session,
 
 见 `codex-rs/protocol/src/request_permissions.rs:10-16`。
 
-授权记录分别写入 TurnState 或 SessionState，见 `codex-rs/core/src/session/mod.rs:2959-2987`。没有全局持久范围。
+上游授权记录分别只写入 TurnState 或 SessionState，没有全局持久范围。OpenCodex 在保留该内存行为的同时，把 Session 范围同步到本机持久授权库，并在后续会话执行前读取合并。
 
 ### 命令和网络已经有各自的持久规则，但没有统一授权语义
 
@@ -252,12 +254,18 @@ accept + scope + normalized grant descriptor
 
 为了控制第一阶段改动规模，本阶段复用了现有精确缓存键，尚未引入统一的公开 `PersistentApprovalStore` trait 和完整 `ApprovalRequestDescriptor` 协议；这些会与撤销 API 一起在后续阶段抽象。
 
-### 第二阶段：文件和动态权限
+### 第二阶段：动态权限跨会话复用（已实现）
 
-1. 给 `FileChangeApprovalDecision` 增加持久范围。
-2. 给 `PermissionGrantScope` 增加 `Persistent`。
-3. 文件授权至少绑定规范化根目录，避免给单个临时文件路径生成大量规则。
-4. 管理策略改变时重新验证并失效不再合规的授权。
+本分支已完成：
+
+1. `request_permissions` 的 Session 授权以独立 JSON 文件原子写入 `$CODEX_HOME/approvals/permissions/`。
+2. 持久键绑定 `environment_id + cwd + workspace_roots`，workspace roots 会排序去重，避免不同项目之间误复用。
+3. 同一环境下的多个精确授权分别保存，读取时合并；并行会话不会因为覆盖同一总文件而丢失其他授权。
+4. 当前会话内授权与磁盘授权在执行前合并，因此新建会话和已打开的并行会话都能看到后来写入的授权。
+5. 保留 Turn 仅本轮、不落盘；空授权、拒绝、取消、超时及 `strict_auto_review` Session 响应均不生成长期权限。
+6. 增加持久存储重载、工作区隔离及跨本地 Session 复用测试。
+
+本阶段没有扩大单个文件修改审批的范围：第一阶段已经按既有精确文件键持久化 `AcceptForSession`。后续若要支持“整个规范化目录”授权，应当新增显式范围和撤销界面，不能把一次文件确认静默扩大为目录权限。
 
 ### 第三阶段：Browser / Computer Use
 

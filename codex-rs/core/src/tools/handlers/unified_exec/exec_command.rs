@@ -305,7 +305,7 @@ impl ExecCommandHandler {
         let permission_cwd = native_cwd.as_ref().unwrap_or(&turn.config.cwd);
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
-            &turn_environment.selection.environment_id,
+            turn_environment,
             permission_cwd.as_path(),
             sandbox_permissions,
             additional_permissions,

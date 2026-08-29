@@ -2,6 +2,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
 use codex_core::sandboxing::SandboxPermissions;
@@ -2055,6 +2056,146 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.stdout.trim(), "session-sticky-ok");
     assert_eq!(fs::read_to_string(&outside_write)?, "session-sticky-ok");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_permissions_session_grants_carry_across_local_sessions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "request_permissions requires a cwd native to the Codex host"
+    );
+
+    let server = start_mock_server().await;
+    let approval_policy = AskForApproval::OnRequest;
+    let permission_profile = CorePermissionProfile::read_only();
+    let mut builder = test_codex().with_config(move |config| {
+        config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+        config
+            .permissions
+            .set_permission_profile(CorePermissionProfile::read_only())
+            .expect("set permission profile");
+        config
+            .features
+            .enable(Feature::ExecPermissionApprovals)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::RequestPermissionsTool)
+            .expect("test config should allow feature update");
+    });
+    let mut test = builder.build_with_auto_env(&server).await?;
+    let requested_permissions = RequestPermissionProfile {
+        network: Some(codex_protocol::models::NetworkPermissions {
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    };
+
+    mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-persistent-permissions-1"),
+                request_permissions_tool_event(
+                    "permissions-call",
+                    "Allow network access in future local sessions",
+                    &requested_permissions,
+                )?,
+                ev_completed("resp-persistent-permissions-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-persistent-permissions-2"),
+                ev_assistant_message("msg-persistent-permissions-1", "done"),
+                ev_completed("resp-persistent-permissions-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_turn(
+        &test,
+        "persist network permissions for other local sessions",
+        approval_policy,
+        permission_profile.clone(),
+    )
+    .await?;
+    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    assert_eq!(granted_permissions, requested_permissions);
+    test.codex
+        .submit(Op::RequestPermissionsResponse {
+            id: "permissions-call".to_string(),
+            response: RequestPermissionsResponse {
+                permissions: requested_permissions.clone(),
+                scope: PermissionGrantScope::Session,
+                strict_auto_review: false,
+            },
+        })
+        .await?;
+    wait_for_completion(&test).await;
+
+    let new_thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions::new(test.config.clone()))
+        .await?;
+    test.codex = new_thread.thread;
+    test.session_configured = new_thread.session_configured;
+
+    let additional_permissions = PermissionProfile {
+        network: requested_permissions.network.clone(),
+        ..Default::default()
+    };
+    let command = "printf 'cross-session-permission-ok'";
+    let cross_session_result = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-persistent-permissions-3"),
+                exec_command_event_with_request_permissions(
+                    "exec-call",
+                    command,
+                    &additional_permissions,
+                )?,
+                ev_completed("resp-persistent-permissions-3"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-persistent-permissions-4"),
+                ev_assistant_message("msg-persistent-permissions-2", "done"),
+                ev_completed("resp-persistent-permissions-4"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_turn(
+        &test,
+        "reuse permissions in a new local session",
+        approval_policy,
+        permission_profile,
+    )
+    .await?;
+    let event = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await;
+    assert!(
+        matches!(event, EventMsg::TurnComplete(_)),
+        "persistent session permissions should skip a second approval: {event:?}"
+    );
+
+    let exec_output = cross_session_result
+        .function_call_output_text("exec-call")
+        .map(|output| json!({ "output": output }))
+        .expect("expected exec-call output");
+    let result = parse_result(&exec_output);
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout.trim(), "cross-session-permission-ok");
 
     Ok(())
 }

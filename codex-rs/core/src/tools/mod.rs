@@ -11,6 +11,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod network_approval;
 pub(crate) mod orchestrator;
 pub(crate) mod parallel;
+pub(crate) mod persistent_permissions;
 pub(crate) mod registry;
 pub(crate) mod router;
 pub(crate) mod runtimes;

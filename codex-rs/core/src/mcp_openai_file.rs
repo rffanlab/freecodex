@@ -162,7 +162,7 @@ async fn build_uploaded_argument_value(
         .join(file_path)
         .map_err(|error| contextualize_error(error.to_string()))?;
     let additional_permissions = merge_permission_profiles(
-        sess.granted_session_permissions(&turn_environment.selection.environment_id)
+        sess.granted_session_permissions(&turn_environment.selection)
             .await
             .as_ref(),
         sess.granted_turn_permissions(&turn_environment.selection.environment_id)
