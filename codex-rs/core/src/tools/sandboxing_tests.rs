@@ -17,6 +17,64 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::HashMap;
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+struct TestApprovalKey {
+    tool: String,
+    target: String,
+}
+
+#[test]
+fn persistent_approval_store_reuses_exact_grant_across_sessions() {
+    let codex_home = tempfile::TempDir::new().expect("create codex home");
+    let key = TestApprovalKey {
+        tool: "publisher".to_string(),
+        target: "account-a".to_string(),
+    };
+
+    let mut first_session = ApprovalStore::persistent(codex_home.path());
+    first_session.put(key.clone(), ReviewDecision::ApprovedForSession);
+
+    let mut second_session = ApprovalStore::persistent(codex_home.path());
+    assert_eq!(
+        second_session.get(&key),
+        Some(ReviewDecision::ApprovedForSession)
+    );
+}
+
+#[test]
+fn persistent_approval_store_does_not_broaden_grant_scope() {
+    let codex_home = tempfile::TempDir::new().expect("create codex home");
+    let approved = TestApprovalKey {
+        tool: "publisher".to_string(),
+        target: "account-a".to_string(),
+    };
+    let different_target = TestApprovalKey {
+        tool: "publisher".to_string(),
+        target: "account-b".to_string(),
+    };
+
+    let mut first_session = ApprovalStore::persistent(codex_home.path());
+    first_session.put(approved, ReviewDecision::ApprovedForSession);
+
+    let mut second_session = ApprovalStore::persistent(codex_home.path());
+    assert_eq!(second_session.get(&different_target), None);
+}
+
+#[test]
+fn one_shot_approval_is_not_persisted() {
+    let codex_home = tempfile::TempDir::new().expect("create codex home");
+    let key = TestApprovalKey {
+        tool: "publisher".to_string(),
+        target: "account-a".to_string(),
+    };
+
+    let mut first_session = ApprovalStore::persistent(codex_home.path());
+    first_session.put(key.clone(), ReviewDecision::Approved);
+
+    let mut second_session = ApprovalStore::persistent(codex_home.path());
+    assert_eq!(second_session.get(&key), None);
+}
+
 #[test]
 fn bash_permission_request_payload_omits_missing_description() {
     assert_eq!(

@@ -2046,7 +2046,7 @@ fn normalize_approval_decision_for_mode(
 }
 
 async fn mcp_tool_approval_is_remembered(sess: &Session, key: &McpToolApprovalKey) -> bool {
-    let store = sess.services.tool_approvals.lock().await;
+    let mut store = sess.services.tool_approvals.lock().await;
     matches!(store.get(key), Some(ReviewDecision::ApprovedForSession))
 }
 

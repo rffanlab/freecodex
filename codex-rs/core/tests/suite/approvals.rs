@@ -4,6 +4,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_config::types::ApprovalsReviewer;
 use codex_core::CodexThread;
+use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
 use codex_core::config::ThreadStoreConfig;
@@ -2202,7 +2203,8 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 #[cfg(unix)]
-async fn approving_apply_patch_for_session_skips_future_prompts_for_same_file() -> Result<()> {
+async fn approving_apply_patch_for_session_skips_future_prompts_across_local_sessions() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -2219,7 +2221,7 @@ async fn approving_apply_patch_for_session_skips_future_prompts_for_same_file() 
                 .expect("set sandbox policy");
             config.approvals_reviewer = ApprovalsReviewer::User;
         });
-    let test = builder.build(&server).await?;
+    let mut test = builder.build(&server).await?;
 
     let target = TargetPath::OutsideWorkspace("apply_patch_allow_session.txt");
     let (path, patch_path) = target.resolve_for_patch(&test);
@@ -2311,6 +2313,63 @@ async fn approving_apply_patch_for_session_skips_future_prompts_for_same_file() 
     }
 
     assert!(fs::read_to_string(&path)?.contains("after"));
+
+    let new_thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions::new(test.config.clone()))
+        .await?;
+    test.codex = new_thread.thread;
+    test.session_configured = new_thread.session_configured;
+
+    let patch_cross_session = format!(
+        "*** Begin Patch\n*** Update File: {patch_path}\n@@\n-after\n+persisted\n*** End Patch\n"
+    );
+    let call_id_3 = "apply_patch_allow_session_3";
+    let _ = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-5"),
+            ev_apply_patch_custom_tool_call(call_id_3, &patch_cross_session),
+            ev_completed("resp-5"),
+        ]),
+    )
+    .await;
+    let _ = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-3", "done"),
+            ev_completed("resp-6"),
+        ]),
+    )
+    .await;
+
+    submit_turn(
+        &test,
+        "apply_patch allow across local sessions",
+        approval_policy,
+        sandbox_policy,
+    )
+    .await?;
+
+    let event = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ApplyPatchApprovalRequest(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await;
+    match event {
+        EventMsg::TurnComplete(_) => {}
+        EventMsg::ApplyPatchApprovalRequest(event) => {
+            panic!(
+                "unexpected cross-session patch approval request: {:?}",
+                event.call_id
+            )
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    assert!(fs::read_to_string(&path)?.contains("persisted"));
     let _ = fs::remove_file(path);
 
     Ok(())

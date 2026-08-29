@@ -1399,7 +1399,7 @@ impl Session {
                 .with_legacy_custom_ca_fallback(),
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
-                tool_approvals: Mutex::new(ApprovalStore::default()),
+                tool_approvals: Mutex::new(ApprovalStore::persistent(config.codex_home.as_path())),
                 guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
                 runtime_handle: tokio::runtime::Handle::current(),
                 skills_service,

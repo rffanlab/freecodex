@@ -31,24 +31,73 @@ use codex_tools::ToolName;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use futures::Future;
+use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
+use uuid::Uuid;
+
+const PERSISTED_APPROVAL_VERSION: u32 = 1;
 
 #[derive(Clone, Default, Debug)]
 pub(crate) struct ApprovalStore {
     // Store serialized keys for generic caching across requests.
     map: HashMap<String, ReviewDecision>,
+    persistence_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PersistedApproval {
+    version: u32,
+    key: String,
 }
 
 impl ApprovalStore {
-    pub fn get<K>(&self, key: &K) -> Option<ReviewDecision>
+    /// Creates a store whose session approvals are also reusable by other local sessions.
+    pub(crate) fn persistent(codex_home: &Path) -> Self {
+        Self {
+            map: HashMap::new(),
+            persistence_dir: Some(codex_home.join("approvals").join("tool")),
+        }
+    }
+
+    pub fn get<K>(&mut self, key: &K) -> Option<ReviewDecision>
     where
         K: Serialize,
     {
         let s = serde_json::to_string(key).ok()?;
-        self.map.get(&s).cloned()
+        if let Some(decision) = self.map.get(&s) {
+            return Some(decision.clone());
+        }
+
+        let path = self.persistence_path(&s)?;
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(err) => {
+                warn!(path = %path.display(), error = %err, "failed to read persistent tool approval");
+                return None;
+            }
+        };
+        let approval: PersistedApproval = match serde_json::from_str(&contents) {
+            Ok(approval) => approval,
+            Err(err) => {
+                warn!(path = %path.display(), error = %err, "failed to parse persistent tool approval");
+                return None;
+            }
+        };
+        if approval.version != PERSISTED_APPROVAL_VERSION || approval.key != s {
+            warn!(path = %path.display(), "ignored invalid persistent tool approval");
+            return None;
+        }
+
+        let decision = ReviewDecision::ApprovedForSession;
+        self.map.insert(s, decision.clone());
+        Some(decision)
     }
 
     pub fn put<K>(&mut self, key: K, value: ReviewDecision)
@@ -56,8 +105,34 @@ impl ApprovalStore {
         K: Serialize,
     {
         if let Ok(s) = serde_json::to_string(&key) {
-            self.map.insert(s, value);
+            self.map.insert(s.clone(), value.clone());
+            if !matches!(value, ReviewDecision::ApprovedForSession) {
+                return;
+            }
+            let Some(path) = self.persistence_path(&s) else {
+                return;
+            };
+            let approval = PersistedApproval {
+                version: PERSISTED_APPROVAL_VERSION,
+                key: s,
+            };
+            let contents = match serde_json::to_string_pretty(&approval) {
+                Ok(contents) => contents,
+                Err(err) => {
+                    warn!(error = %err, "failed to serialize persistent tool approval");
+                    return;
+                }
+            };
+            if let Err(err) = codex_utils_path::write_atomically(&path, &contents) {
+                warn!(path = %path.display(), error = %err, "failed to persist tool approval");
+            }
         }
+    }
+
+    fn persistence_path(&self, serialized_key: &str) -> Option<PathBuf> {
+        let directory = self.persistence_dir.as_ref()?;
+        let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, serialized_key.as_bytes());
+        Some(directory.join(format!("{id}.json")))
     }
 }
 
@@ -85,7 +160,7 @@ where
     }
 
     let already_approved = {
-        let store = services.tool_approvals.lock().await;
+        let mut store = services.tool_approvals.lock().await;
         keys.iter()
             .all(|key| matches!(store.get(key), Some(ReviewDecision::ApprovedForSession)))
     };
