@@ -32,6 +32,7 @@ mod thread_usage;
 mod turn_submission;
 
 use super::*;
+use crate::app::agent_message_consolidation::AgentMessageConsolidationContent;
 use crate::app_backtrack::BacktrackSelection;
 use crate::app_backtrack::BacktrackState;
 use crate::app_backtrack::user_count;
@@ -5265,6 +5266,7 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),
+            timestamp: None,
         }) as Arc<dyn HistoryCell>
     };
     let agent_cell = |text: &str| -> Arc<dyn HistoryCell> {
@@ -6087,7 +6089,10 @@ async fn directive_only_completion_removes_streamed_directive() -> Result<()> {
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.handle_consolidate_agent_message(
         &mut tui,
-        String::new(),
+        AgentMessageConsolidationContent {
+            source: String::new(),
+            timestamp: None,
+        },
         PathBuf::from("/tmp"),
         /*inline_visualization_context*/ None,
         ConsolidationScrollbackReflow::Required,
@@ -6132,8 +6137,12 @@ async fn required_stream_reflow_during_capped_initial_replay_survives_transcript
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.handle_consolidate_agent_message(
         &mut tui,
-        "Final answer:\n\n| Pattern | Outcome |\n| --- | --- |\n| Table tail | Preserved |"
-            .to_string(),
+        AgentMessageConsolidationContent {
+            source:
+                "Final answer:\n\n| Pattern | Outcome |\n| --- | --- |\n| Table tail | Preserved |"
+                    .to_string(),
+            timestamp: None,
+        },
         PathBuf::from("/tmp"),
         /*inline_visualization_context*/ None,
         ConsolidationScrollbackReflow::Required,
@@ -6608,6 +6617,7 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             text_elements,
             local_image_paths,
             remote_image_urls,
+            timestamp: None,
         }) as Arc<dyn HistoryCell>
     };
     let agent_cell = |text: &str| -> Arc<dyn HistoryCell> {
@@ -8493,6 +8503,7 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
         remote_image_urls: Vec::new(),
+        timestamp: None,
     }) as Arc<dyn HistoryCell>];
     app.overlay = Some(Overlay::new_transcript(
         app.transcript_cells.clone(),

@@ -1034,6 +1034,7 @@ mod tests {
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),
+            timestamp: None,
         }) as Arc<dyn HistoryCell>);
 
         assert!(has_backtrack_target(&cells));

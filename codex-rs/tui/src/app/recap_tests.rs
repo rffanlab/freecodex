@@ -51,6 +51,7 @@ fn user_history_cell(message: &str) -> Arc<dyn HistoryCell> {
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
         remote_image_urls: Vec::new(),
+        timestamp: None,
     })
 }
 

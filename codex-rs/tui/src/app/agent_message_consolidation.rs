@@ -21,16 +21,23 @@ use crate::inline_visualization::InlineVisualizationContext;
 use crate::pager_overlay::Overlay;
 use crate::tui;
 
+pub(super) struct AgentMessageConsolidationContent {
+    pub(super) source: String,
+    pub(super) timestamp: Option<history_cell::MessageTimestamp>,
+}
+
 impl App {
     pub(super) fn handle_consolidate_agent_message(
         &mut self,
         tui: &mut tui::Tui,
-        source: String,
+        content: AgentMessageConsolidationContent,
         cwd: PathBuf,
         inline_visualization_context: Option<InlineVisualizationContext>,
         scrollback_reflow: ConsolidationScrollbackReflow,
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
     ) -> Result<()> {
+        let AgentMessageConsolidationContent { source, timestamp } = content;
+
         // Some finalize paths must preserve a last provisional stream cell long
         // enough for queue ordering, then fold it into the canonical
         // source-backed cell during consolidation.
@@ -55,10 +62,11 @@ impl App {
                 "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
             );
             let consolidated: Arc<dyn HistoryCell> = Arc::new(
-                history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+                history_cell::AgentMarkdownCell::new_with_inline_visualizations_and_timestamp(
                     source,
                     &cwd,
                     inline_visualization_context,
+                    timestamp,
                 ),
             );
             self.transcript_cells

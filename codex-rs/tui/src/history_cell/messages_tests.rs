@@ -3,6 +3,54 @@ use crate::history_cell::markdown_render_cache::MarkdownRenderCacheKey;
 use assert_matches::assert_matches;
 use pretty_assertions::assert_eq;
 
+fn rendered_text(lines: Vec<Line<'static>>) -> String {
+    lines
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn user_and_agent_messages_render_timestamps() {
+    let timestamp = MessageTimestamp::for_test("09:41");
+    let user = UserHistoryCell {
+        message: "Please inspect this change".to_string(),
+        text_elements: Vec::new(),
+        local_image_paths: Vec::new(),
+        remote_image_urls: Vec::new(),
+        timestamp: Some(timestamp.clone()),
+    };
+    let agent = AgentMarkdownCell::new_with_inline_visualizations_and_timestamp(
+        "The change looks good.".to_string(),
+        Path::new("/tmp"),
+        /*inline_visualization_context*/ None,
+        Some(timestamp),
+    );
+
+    insta::assert_snapshot!(
+        format!(
+            "user:\n{}\n\nagent:\n{}",
+            rendered_text(user.display_lines(/*width*/ 80)),
+            rendered_text(agent.display_lines(/*width*/ 80)),
+        ),
+        @r"
+    user:
+
+    › [09:41] Please inspect this change
+
+
+    agent:
+    • [09:41] The change looks good.
+    "
+    );
+}
+
 #[test]
 fn sanitizer_borrows_clean_text_and_removes_control_sequences() {
     for (text, expected) in [

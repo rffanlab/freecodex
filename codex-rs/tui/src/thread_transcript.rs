@@ -66,10 +66,18 @@ pub(crate) fn thread_to_transcript_cells(
 ) -> TranscriptCells {
     let cwd = thread.cwd;
     let thread_id = ThreadId::from_string(&thread.id).ok();
-    let mut cells = thread_items_to_transcript_cells(
+    let items = thread.turns.into_iter().flat_map(|turn| {
+        let timestamp = turn
+            .started_at
+            .and_then(crate::history_cell::MessageTimestamp::from_unix_seconds);
+        turn.items
+            .into_iter()
+            .map(move |item| (timestamp.clone(), item))
+    });
+    let mut cells = thread_items_with_timestamps_to_transcript_cells(
         thread_id,
         &cwd,
-        thread.turns.into_iter().flat_map(|turn| turn.items),
+        items,
         raw_reasoning_visibility,
         config,
     );
@@ -88,11 +96,27 @@ pub(crate) fn thread_items_to_transcript_cells(
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
 ) -> TranscriptCells {
+    thread_items_with_timestamps_to_transcript_cells(
+        thread_id,
+        cwd,
+        items.into_iter().map(|item| (None, item)),
+        raw_reasoning_visibility,
+        config,
+    )
+}
+
+fn thread_items_with_timestamps_to_transcript_cells(
+    thread_id: Option<ThreadId>,
+    cwd: &AbsolutePathBuf,
+    items: impl IntoIterator<Item = (Option<crate::history_cell::MessageTimestamp>, ThreadItem)>,
+    raw_reasoning_visibility: RawReasoningVisibility,
+    config: Option<&Config>,
+) -> TranscriptCells {
     let inline_visualization_context = config.and_then(|config| {
         thread_id.and_then(|thread_id| InlineVisualizationContext::from_config(config, thread_id))
     });
     let mut cells: TranscriptCells = Vec::new();
-    for item in items {
+    for (timestamp, item) in items {
         match item {
             ThreadItem::UserMessage {
                 id,
@@ -123,16 +147,20 @@ pub(crate) fn thread_items_to_transcript_cells(
                     text_elements: item.text_elements(),
                     local_image_paths: item.local_image_paths(),
                     remote_image_urls: item.image_urls(),
+                    timestamp,
                 }));
             }
             ThreadItem::AgentMessage { text, .. } => {
                 let parsed = parse_assistant_markdown(&text, cwd.as_path());
                 if !parsed.visible_markdown.trim().is_empty() {
-                    cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
-                        parsed.visible_markdown,
-                        cwd.as_path(),
-                        inline_visualization_context.clone(),
-                    )));
+                    cells.push(Arc::new(
+                        AgentMarkdownCell::new_with_inline_visualizations_and_timestamp(
+                            parsed.visible_markdown,
+                            cwd.as_path(),
+                            inline_visualization_context.clone(),
+                            timestamp,
+                        ),
+                    ));
                 }
             }
             ThreadItem::FunctionCallOutput {

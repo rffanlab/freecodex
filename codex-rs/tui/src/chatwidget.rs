@@ -1358,7 +1358,7 @@ impl ChatWidget {
             || !display.local_images.is_empty()
             || !display.remote_image_urls.is_empty()
         {
-            self.add_to_history(history_cell::new_user_prompt(
+            self.add_to_history(history_cell::new_timestamped_user_prompt(
                 display.message,
                 display.text_elements,
                 display.local_images,

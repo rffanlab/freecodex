@@ -937,6 +937,7 @@ pub(crate) enum AppEvent {
         inline_visualization_context: Option<InlineVisualizationContext>,
         scrollback_reflow: ConsolidationScrollbackReflow,
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
+        timestamp: Option<crate::history_cell::MessageTimestamp>,
     },
 
     /// Replace the contiguous run of streaming `ProposedPlanStreamCell`s at the

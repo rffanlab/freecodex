@@ -475,6 +475,7 @@ impl StreamCore {
 pub(crate) struct StreamController {
     core: StreamCore,
     header_emitted: bool,
+    timestamp: Option<history_cell::MessageTimestamp>,
 }
 
 impl StreamController {
@@ -493,15 +494,33 @@ impl StreamController {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_inline_visualizations(
         width: Option<usize>,
         cwd: &Path,
         render_mode: HistoryRenderMode,
         inline_visualization_context: Option<InlineVisualizationContext>,
     ) -> Self {
+        Self::new_with_inline_visualizations_and_timestamp(
+            width,
+            cwd,
+            render_mode,
+            inline_visualization_context,
+            /*timestamp*/ None,
+        )
+    }
+
+    pub(crate) fn new_with_inline_visualizations_and_timestamp(
+        width: Option<usize>,
+        cwd: &Path,
+        render_mode: HistoryRenderMode,
+        inline_visualization_context: Option<InlineVisualizationContext>,
+        timestamp: Option<history_cell::MessageTimestamp>,
+    ) -> Self {
         Self {
             core: StreamCore::new(width, cwd, render_mode, inline_visualization_context),
             header_emitted: false,
+            timestamp,
         }
     }
 
@@ -558,6 +577,10 @@ impl StreamController {
         !self.header_emitted && self.core.enqueued_stable_len == 0
     }
 
+    pub(crate) fn timestamp(&self) -> Option<history_cell::MessageTimestamp> {
+        self.timestamp.clone()
+    }
+
     #[inline]
     pub(crate) fn has_live_tail(&self) -> bool {
         self.core.has_tail()
@@ -581,11 +604,15 @@ impl StreamController {
             return None;
         }
         Some(Box::new(
-            history_cell::AgentMessageCell::new_hyperlink_lines(lines, {
-                let header_emitted = self.header_emitted;
-                self.header_emitted = true;
-                !header_emitted
-            }),
+            history_cell::AgentMessageCell::new_timestamped_hyperlink_lines(
+                lines,
+                {
+                    let header_emitted = self.header_emitted;
+                    self.header_emitted = true;
+                    !header_emitted
+                },
+                self.timestamp.clone(),
+            ),
         ))
     }
 }

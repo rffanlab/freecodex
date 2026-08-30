@@ -568,10 +568,14 @@ impl App {
                 inline_visualization_context,
                 scrollback_reflow,
                 deferred_history_cell,
+                timestamp,
             } => {
                 self.handle_consolidate_agent_message(
                     tui,
-                    source,
+                    super::agent_message_consolidation::AgentMessageConsolidationContent {
+                        source,
+                        timestamp,
+                    },
                     cwd,
                     inline_visualization_context,
                     scrollback_reflow,

@@ -3,10 +3,10 @@ source: tui/src/chatwidget/tests/status_and_layout.rs
 expression: normalize_snapshot_paths(terminal.backend().vt100().screen().contents())
 ---
 
-› count to 1
+› [12:34] count to 1
 
 
-• 1
+• [12:34] 1
 
 
 › Ask Codex to do anything

@@ -2,6 +2,6 @@
 source: tui/src/app/tests/safety_buffering.rs
 expression: rendered_retry
 ---
-› Handle the safety-buffered request
-  Keep the accepted steer
-⚠ Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.• done
+› [12:34] Handle the safety-buffered request
+          Keep the accepted steer
+⚠ Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.• [12:34] done

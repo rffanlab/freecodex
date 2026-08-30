@@ -26,6 +26,7 @@ impl ChatWidget {
     fn flush_answer_stream(&mut self, completed_message: Option<&str>) {
         let had_stream_controller = self.stream_controller.is_some();
         if let Some(mut controller) = self.stream_controller.take() {
+            let timestamp = controller.timestamp();
             let had_live_tail = controller.has_live_tail();
             self.clear_active_stream_tail();
             let (cell, streamed_source) = controller.finalize();
@@ -76,6 +77,7 @@ impl ChatWidget {
                     inline_visualization_context,
                     scrollback_reflow,
                     deferred_history_cell,
+                    timestamp,
                 });
             }
         }
@@ -473,12 +475,15 @@ impl ChatWidget {
                     thread_id,
                 )
             });
-            self.stream_controller = Some(StreamController::new_with_inline_visualizations(
-                self.current_stream_width(/*reserved_cols*/ 2),
-                &self.config.cwd,
-                self.history_render_mode(),
-                inline_visualization_context,
-            ));
+            self.stream_controller = Some(
+                StreamController::new_with_inline_visualizations_and_timestamp(
+                    self.current_stream_width(/*reserved_cols*/ 10),
+                    &self.config.cwd,
+                    self.history_render_mode(),
+                    inline_visualization_context,
+                    Some(history_cell::MessageTimestamp::now()),
+                ),
+            );
         }
         if let Some(controller) = self.stream_controller.as_mut()
             && controller.push(&delta)
@@ -512,9 +517,10 @@ impl ChatWidget {
             }
 
             self.bottom_pane.hide_status_indicator();
-            let cell = history_cell::StreamingAgentTailCell::new(
+            let cell = history_cell::StreamingAgentTailCell::new_timestamped(
                 tail_lines,
                 controller.tail_starts_stream(),
+                controller.timestamp(),
             );
             if self
                 .transcript

@@ -6,7 +6,83 @@ use crate::terminal_hyperlinks::annotate_web_urls_in_line;
 use crate::terminal_hyperlinks::remap_wrapped_line;
 use crate::wrapping::url_preserving_wrap_options;
 use crate::wrapping::word_wrap_line;
+use chrono::Local;
 use std::borrow::Cow;
+
+const MESSAGE_TIMESTAMP_WIDTH: u16 = 8;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MessageTimestamp(String);
+
+impl MessageTimestamp {
+    pub(crate) fn now() -> Self {
+        #[cfg(test)]
+        {
+            Self("12:34".to_string())
+        }
+        #[cfg(not(test))]
+        Self(Local::now().format("%H:%M").to_string())
+    }
+
+    pub(crate) fn from_unix_seconds(seconds: i64) -> Option<Self> {
+        chrono::DateTime::from_timestamp(seconds, 0)
+            .map(|timestamp| timestamp.with_timezone(&Local))
+            .map(|timestamp| Self(timestamp.format("%H:%M").to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_string())
+    }
+
+    fn initial_indent(&self, marker: Span<'static>) -> Line<'static> {
+        vec![marker, format!("[{}] ", self.0).dim()].into()
+    }
+}
+
+fn message_initial_indent(
+    marker: Span<'static>,
+    timestamp: Option<&MessageTimestamp>,
+) -> Line<'static> {
+    if let Some(timestamp) = timestamp {
+        timestamp.initial_indent(marker)
+    } else {
+        Line::from(marker)
+    }
+}
+
+fn message_subsequent_indent(timestamp: Option<&MessageTimestamp>) -> Line<'static> {
+    Line::from(" ".repeat(usize::from(
+        LIVE_PREFIX_COLS + timestamp.map_or(0, |_| MESSAGE_TIMESTAMP_WIDTH),
+    )))
+}
+
+fn prefix_message_hyperlink_lines(
+    lines: Vec<HyperlinkLine>,
+    initial_prefix: Line<'static>,
+    subsequent_prefix: Line<'static>,
+) -> Vec<HyperlinkLine> {
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut line)| {
+            let prefix = if index == 0 {
+                initial_prefix.clone()
+            } else {
+                subsequent_prefix.clone()
+            };
+            let shift = prefix.width();
+            let mut spans = Vec::with_capacity(line.line.spans.len() + prefix.spans.len());
+            spans.extend(prefix.spans);
+            spans.extend(line.line.spans);
+            line.line = Line::from(spans).style(line.line.style);
+            for hyperlink in &mut line.hyperlinks {
+                hyperlink.columns = hyperlink.columns.start + shift..hyperlink.columns.end + shift;
+            }
+            line
+        })
+        .collect()
+}
 
 #[derive(Debug)]
 pub(crate) struct UserHistoryCell {
@@ -15,6 +91,7 @@ pub(crate) struct UserHistoryCell {
     #[allow(dead_code)]
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
+    pub timestamp: Option<MessageTimestamp>,
 }
 
 /// Remove CSI sequences and control characters, preserving tabs and newlines.
@@ -165,7 +242,12 @@ impl HistoryCell for UserHistoryCell {
         };
         let wrap_width = width
             .saturating_sub(
-                LIVE_PREFIX_COLS + 1, /* keep a one-column right margin for wrapping */
+                LIVE_PREFIX_COLS
+                    + self
+                        .timestamp
+                        .as_ref()
+                        .map_or(0, |_| MESSAGE_TIMESTAMP_WIDTH)
+                    + 1, /* keep a one-column right margin for wrapping */
             )
             .max(1);
 
@@ -260,10 +342,10 @@ impl HistoryCell for UserHistoryCell {
         }
 
         if let Some(wrapped_message) = wrapped_message {
-            lines.extend(prefix_hyperlink_lines(
+            lines.extend(prefix_message_hyperlink_lines(
                 wrapped_message,
-                "› ".bold().dim(),
-                "  ".into(),
+                message_initial_indent("› ".bold().dim(), self.timestamp.as_ref()),
+                message_subsequent_indent(self.timestamp.as_ref()),
             ));
         }
 
@@ -370,6 +452,7 @@ impl HistoryCell for ReasoningSummaryCell {
 pub(crate) struct AgentMessageCell {
     lines: Vec<HyperlinkLine>,
     is_first_line: bool,
+    timestamp: Option<MessageTimestamp>,
 }
 
 impl AgentMessageCell {
@@ -378,13 +461,19 @@ impl AgentMessageCell {
         Self {
             lines: plain_hyperlink_lines(lines),
             is_first_line,
+            timestamp: None,
         }
     }
 
-    pub(crate) fn new_hyperlink_lines(lines: Vec<HyperlinkLine>, is_first_line: bool) -> Self {
+    pub(crate) fn new_timestamped_hyperlink_lines(
+        lines: Vec<HyperlinkLine>,
+        is_first_line: bool,
+        timestamp: Option<MessageTimestamp>,
+    ) -> Self {
         Self {
             lines,
             is_first_line,
+            timestamp,
         }
     }
 }
@@ -398,11 +487,11 @@ impl HistoryCell for AgentMessageCell {
         let mut wrapped = Vec::new();
         for (index, line) in self.lines.iter().enumerate() {
             let initial_indent = if index == 0 && self.is_first_line {
-                "• ".dim().into()
+                message_initial_indent("• ".dim(), self.timestamp.as_ref())
             } else {
-                "  ".into()
+                message_subsequent_indent(self.timestamp.as_ref())
             };
-            let mut subsequent_indent = Line::from("  ");
+            let mut subsequent_indent = message_subsequent_indent(self.timestamp.as_ref());
             subsequent_indent
                 .spans
                 .extend(crate::insert_history::leading_whitespace_prefix(&line.line).spans);
@@ -449,6 +538,7 @@ pub(crate) struct AgentMarkdownCell {
     cwd: PathBuf,
     inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
     rendered_lines: Option<MarkdownRenderCache>,
+    timestamp: Option<MessageTimestamp>,
 }
 
 impl AgentMarkdownCell {
@@ -466,12 +556,29 @@ impl AgentMarkdownCell {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_inline_visualizations(
         markdown_source: String,
         cwd: &Path,
         inline_visualization_context: Option<
             crate::inline_visualization::InlineVisualizationContext,
         >,
+    ) -> Self {
+        Self::new_with_inline_visualizations_and_timestamp(
+            markdown_source,
+            cwd,
+            inline_visualization_context,
+            /*timestamp*/ None,
+        )
+    }
+
+    pub(crate) fn new_with_inline_visualizations_and_timestamp(
+        markdown_source: String,
+        cwd: &Path,
+        inline_visualization_context: Option<
+            crate::inline_visualization::InlineVisualizationContext,
+        >,
+        timestamp: Option<MessageTimestamp>,
     ) -> Self {
         let rendered_lines =
             (!crate::inline_visualization::contains_inline_visualization(&markdown_source))
@@ -481,6 +588,7 @@ impl AgentMarkdownCell {
             cwd: cwd.to_path_buf(),
             inline_visualization_context,
             rendered_lines,
+            timestamp,
         }
     }
 }
@@ -507,13 +615,18 @@ impl HistoryCell for AgentMarkdownCell {
 
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         let render = || {
-            let Some(wrap_width) =
-                crate::width::usable_content_width_u16(width, /*reserved_cols*/ 2)
-            else {
-                return prefix_hyperlink_lines(
+            let Some(wrap_width) = crate::width::usable_content_width_u16(
+                width,
+                LIVE_PREFIX_COLS
+                    + self
+                        .timestamp
+                        .as_ref()
+                        .map_or(0, |_| MESSAGE_TIMESTAMP_WIDTH),
+            ) else {
+                return prefix_message_hyperlink_lines(
                     vec![HyperlinkLine::new(Line::default())],
-                    "• ".dim(),
-                    "  ".into(),
+                    message_initial_indent("• ".dim(), self.timestamp.as_ref()),
+                    message_subsequent_indent(self.timestamp.as_ref()),
                 );
             };
 
@@ -525,10 +638,10 @@ impl HistoryCell for AgentMarkdownCell {
                 Some(self.cwd.as_path()),
                 self.inline_visualization_context.as_ref(),
             );
-            normalize_whitespace_only_hyperlink_lines(prefix_hyperlink_lines(
+            normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(
                 lines,
-                "• ".dim(),
-                "  ".into(),
+                message_initial_indent("• ".dim(), self.timestamp.as_ref()),
+                message_subsequent_indent(self.timestamp.as_ref()),
             ))
         };
 
@@ -565,13 +678,28 @@ mod tests;
 pub(crate) struct StreamingAgentTailCell {
     lines: Vec<HyperlinkLine>,
     is_first_line: bool,
+    timestamp: Option<MessageTimestamp>,
 }
 
 impl StreamingAgentTailCell {
+    #[cfg(test)]
     pub(crate) fn new(lines: Vec<HyperlinkLine>, is_first_line: bool) -> Self {
         Self {
             lines,
             is_first_line,
+            timestamp: None,
+        }
+    }
+
+    pub(crate) fn new_timestamped(
+        lines: Vec<HyperlinkLine>,
+        is_first_line: bool,
+        timestamp: Option<MessageTimestamp>,
+    ) -> Self {
+        Self {
+            lines,
+            is_first_line,
+            timestamp,
         }
     }
 }
@@ -584,14 +712,14 @@ impl HistoryCell for StreamingAgentTailCell {
     fn display_hyperlink_lines(&self, _width: u16) -> Vec<HyperlinkLine> {
         // Tail lines are already rendered at the controller's current stream width.
         // Re-wrapping them here can split table borders and produce malformed in-flight rows.
-        normalize_whitespace_only_hyperlink_lines(prefix_hyperlink_lines(
+        normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(
             self.lines.clone(),
             if self.is_first_line {
-                "• ".dim()
+                message_initial_indent("• ".dim(), self.timestamp.as_ref())
             } else {
-                "  ".into()
+                message_subsequent_indent(self.timestamp.as_ref())
             },
-            "  ".into(),
+            message_subsequent_indent(self.timestamp.as_ref()),
         ))
     }
 
@@ -618,7 +746,19 @@ pub(crate) fn new_user_prompt(
         text_elements,
         local_image_paths,
         remote_image_urls,
+        timestamp: None,
     }
+}
+
+pub(crate) fn new_timestamped_user_prompt(
+    message: String,
+    text_elements: Vec<TextElement>,
+    local_image_paths: Vec<PathBuf>,
+    remote_image_urls: Vec<String>,
+) -> UserHistoryCell {
+    let mut cell = new_user_prompt(message, text_elements, local_image_paths, remote_image_urls);
+    cell.timestamp = Some(MessageTimestamp::now());
+    cell
 }
 /// Create the reasoning history cell emitted at the end of a reasoning block.
 ///
