@@ -37,6 +37,31 @@ struct RecordingReviewer {
     response: ReviewerResponse,
 }
 
+struct CountingReviewer {
+    calls: AtomicUsize,
+    response: Option<ElicitationResponse>,
+}
+
+impl CountingReviewer {
+    fn new(response: Option<ElicitationResponse>) -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::default(),
+            response,
+        })
+    }
+}
+
+impl ElicitationReviewer for CountingReviewer {
+    fn review(
+        &self,
+        _request: ElicitationReviewRequest,
+    ) -> BoxFuture<'static, Result<Option<ElicitationResponse>>> {
+        self.calls.fetch_add(/*val*/ 1, Relaxed);
+        let response = self.response.clone();
+        async move { Ok(response) }.boxed()
+    }
+}
+
 impl RecordingReviewer {
     fn new(response: ReviewerResponse) -> Arc<Self> {
         Arc::new(Self {
@@ -486,20 +511,77 @@ fn local_actor_config(
 }
 
 fn local_actor_elicitation(advertised_persistence: Value) -> Elicitation {
+    local_actor_elicitation_with_params(
+        advertised_persistence,
+        json!({ "origin": "https://example.com", "account": "business" }),
+        /*strict_auto_review*/ false,
+    )
+}
+
+fn local_actor_elicitation_with_params(
+    advertised_persistence: Value,
+    tool_params: Value,
+    strict_auto_review: bool,
+) -> Elicitation {
+    let mut meta = Map::from_iter([
+        (APPROVAL_KIND_KEY.into(), json!(APPROVAL_KIND_MCP_TOOL_CALL)),
+        (CONNECTOR_ID_KEY.into(), json!("browser-use")),
+        (TOOL_NAME_KEY.into(), json!("publish_post")),
+        (TOOL_PARAMS_KEY.into(), tool_params),
+        (PERSIST_KEY.into(), advertised_persistence),
+    ]);
+    if strict_auto_review {
+        meta.insert(STRICT_AUTO_REVIEW_KEY.into(), json!(true));
+    }
     Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
-        meta: Some(RequestMetaObject::from(Map::from_iter([
-            (APPROVAL_KIND_KEY.into(), json!(APPROVAL_KIND_MCP_TOOL_CALL)),
-            (CONNECTOR_ID_KEY.into(), json!("browser-use")),
-            (TOOL_NAME_KEY.into(), json!("publish_post")),
-            (
-                TOOL_PARAMS_KEY.into(),
-                json!({ "origin": "https://example.com", "account": "business" }),
-            ),
-            (PERSIST_KEY.into(), advertised_persistence),
-        ]))),
+        meta: Some(RequestMetaObject::from(meta)),
         message: "Allow this local actor operation?".to_string(),
         requested_schema: ElicitationSchema::builder().build().unwrap(),
     })
+}
+
+async fn persist_local_actor_approval(config: Arc<McpConfig>, elicitation: Elicitation) {
+    let manager = ElicitationRequestManager::new(
+        config,
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        ElicitationRequestRouter::default(),
+    );
+    let (tx_event, events) = async_channel::bounded(1);
+    let sender = manager.make_sender("local-actor".to_string(), Some(tx_event));
+    let pending = tokio::spawn(async move {
+        sender(RequestId::Number(1), elicitation)
+            .await
+            .expect("initial elicitation should resolve")
+    });
+    let event = events.recv().await.expect("initial elicitation event");
+    let EventMsg::ElicitationRequest(request) = event.msg else {
+        panic!("expected initial elicitation request event");
+    };
+    let request_id = match request.id {
+        ProtocolRequestId::String(value) => RequestId::String(value.into()),
+        ProtocolRequestId::Integer(value) => RequestId::Number(value),
+    };
+    manager
+        .router
+        .resolve(
+            "local-actor".to_string(),
+            request_id,
+            ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(json!({})),
+                meta: None,
+            },
+        )
+        .await
+        .expect("initial response should route");
+    assert_eq!(
+        pending
+            .await
+            .expect("initial elicitation task should finish")
+            .action,
+        ElicitationAction::Accept
+    );
 }
 
 #[tokio::test]
@@ -620,62 +702,23 @@ async fn local_actor_declines_are_never_persisted() {
 }
 
 #[tokio::test]
-async fn accepted_local_actor_operation_is_reused_without_a_second_event() {
+async fn persistent_local_actor_approval_bypasses_reviewer() {
     let codex_home = tempfile::tempdir().expect("temporary Codex home");
     let config = local_actor_config(
         "browser@openai-bundled",
         codex_home.path(),
         ConfigRequirementsToml::default(),
     );
-
-    let first_manager = ElicitationRequestManager::new(
+    persist_local_actor_approval(
         config.clone(),
-        /*reviewer*/ None,
-        /*lifecycle*/ None,
-        ElicitationRequestRouter::default(),
-    );
-    let (first_tx_event, first_events) = async_channel::bounded(1);
-    let first_sender = first_manager.make_sender("local-actor".to_string(), Some(first_tx_event));
-    let first_pending = tokio::spawn(async move {
-        first_sender(
-            RequestId::Number(1),
-            local_actor_elicitation(json!(PERSIST_ALWAYS)),
-        )
-        .await
-        .expect("first elicitation should resolve")
-    });
-    let first_event = first_events.recv().await.expect("first elicitation event");
-    let EventMsg::ElicitationRequest(first_request) = first_event.msg else {
-        panic!("expected first elicitation request event");
-    };
-    let first_request_id = match first_request.id {
-        ProtocolRequestId::String(value) => RequestId::String(value.into()),
-        ProtocolRequestId::Integer(value) => RequestId::Number(value),
-    };
-    first_manager
-        .router
-        .resolve(
-            "local-actor".to_string(),
-            first_request_id,
-            ElicitationResponse {
-                action: ElicitationAction::Accept,
-                content: Some(json!({})),
-                meta: None,
-            },
-        )
-        .await
-        .expect("first response should route");
-    assert_eq!(
-        first_pending
-            .await
-            .expect("first task should finish")
-            .action,
-        ElicitationAction::Accept
-    );
+        local_actor_elicitation(json!(PERSIST_ALWAYS)),
+    )
+    .await;
 
+    let reviewer = CountingReviewer::new(/*response*/ None);
     let second_manager = ElicitationRequestManager::new(
         config,
-        /*reviewer*/ None,
+        Some(reviewer.clone()),
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),
     );
@@ -690,5 +733,164 @@ async fn accepted_local_actor_operation_is_reused_without_a_second_event() {
     .expect("second elicitation should use persisted approval");
 
     assert_eq!(second_response.action, ElicitationAction::Accept);
+    assert_eq!(reviewer.calls.load(Relaxed), 0);
     assert!(second_events.is_empty());
+}
+
+#[tokio::test]
+async fn strict_auto_review_does_not_use_persistent_local_actor_approval() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = local_actor_config(
+        "browser@openai-bundled",
+        codex_home.path(),
+        ConfigRequirementsToml::default(),
+    );
+    persist_local_actor_approval(
+        config.clone(),
+        local_actor_elicitation(json!(PERSIST_ALWAYS)),
+    )
+    .await;
+
+    let reviewer = CountingReviewer::new(Some(approved_response()));
+    let manager = ElicitationRequestManager::new(
+        config,
+        Some(reviewer.clone()),
+        /*lifecycle*/ None,
+        ElicitationRequestRouter::default(),
+    );
+    let (tx_event, events) = async_channel::bounded(1);
+    let sender = manager.make_sender("local-actor".to_string(), Some(tx_event));
+    let response = sender(
+        RequestId::Number(2),
+        local_actor_elicitation_with_params(
+            json!(PERSIST_ALWAYS),
+            json!({ "origin": "https://example.com", "account": "business" }),
+            /*strict_auto_review*/ true,
+        ),
+    )
+    .await
+    .expect("strict elicitation should be reviewed");
+
+    assert_eq!(response, approved_response());
+    assert_eq!(reviewer.calls.load(Relaxed), 1);
+    assert!(events.is_empty());
+}
+
+#[tokio::test]
+async fn policy_denials_take_precedence_over_persistent_local_actor_approval() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let base_config = local_actor_config(
+        "browser@openai-bundled",
+        codex_home.path(),
+        ConfigRequirementsToml::default(),
+    );
+    persist_local_actor_approval(
+        base_config.clone(),
+        local_actor_elicitation(json!(PERSIST_ALWAYS)),
+    )
+    .await;
+
+    for approval_policy in [
+        AskForApproval::Never,
+        AskForApproval::Granular(GranularApprovalConfig {
+            sandbox_approval: true,
+            rules: true,
+            skill_approval: true,
+            request_permissions: true,
+            mcp_elicitations: false,
+        }),
+    ] {
+        let mut config = (*base_config).clone();
+        config.approval_policy = Constrained::allow_any(approval_policy);
+        config.permission_profile = PermissionProfile::read_only();
+        config
+            .server_permission_profiles
+            .insert("local-actor".to_string(), PermissionProfile::read_only());
+        let manager = ElicitationRequestManager::new(
+            Arc::new(config),
+            /*reviewer*/ None,
+            /*lifecycle*/ None,
+            ElicitationRequestRouter::default(),
+        );
+        let (tx_event, events) = async_channel::bounded(1);
+        let sender = manager.make_sender("local-actor".to_string(), Some(tx_event));
+        let response = sender(
+            RequestId::Number(2),
+            local_actor_elicitation(json!(PERSIST_ALWAYS)),
+        )
+        .await
+        .expect("denied elicitation should resolve");
+
+        assert_eq!(response.action, ElicitationAction::Decline);
+        assert!(events.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn different_tool_params_do_not_reuse_persistent_local_actor_approval() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = local_actor_config(
+        "browser@openai-bundled",
+        codex_home.path(),
+        ConfigRequirementsToml::default(),
+    );
+    persist_local_actor_approval(
+        config.clone(),
+        local_actor_elicitation(json!(PERSIST_ALWAYS)),
+    )
+    .await;
+
+    let manager = ElicitationRequestManager::new(
+        config,
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        ElicitationRequestRouter::default(),
+    );
+    let (tx_event, events) = async_channel::bounded(1);
+    let sender = manager.make_sender("local-actor".to_string(), Some(tx_event));
+    let pending = tokio::spawn(async move {
+        sender(
+            RequestId::Number(2),
+            local_actor_elicitation_with_params(
+                json!(PERSIST_ALWAYS),
+                json!({
+                    "origin": "https://example.com",
+                    "account": "business",
+                    "content": "different post",
+                }),
+                /*strict_auto_review*/ false,
+            ),
+        )
+        .await
+        .expect("different operation should reach the user")
+    });
+    let event = events.recv().await.expect("different operation event");
+    let EventMsg::ElicitationRequest(request) = event.msg else {
+        panic!("expected different operation elicitation event");
+    };
+    let request_id = match request.id {
+        ProtocolRequestId::String(value) => RequestId::String(value.into()),
+        ProtocolRequestId::Integer(value) => RequestId::Number(value),
+    };
+    manager
+        .router
+        .resolve(
+            "local-actor".to_string(),
+            request_id,
+            ElicitationResponse {
+                action: ElicitationAction::Decline,
+                content: None,
+                meta: None,
+            },
+        )
+        .await
+        .expect("different operation response should route");
+
+    assert_eq!(
+        pending
+            .await
+            .expect("different operation task should finish")
+            .action,
+        ElicitationAction::Decline
+    );
 }

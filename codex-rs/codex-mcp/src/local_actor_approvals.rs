@@ -149,7 +149,7 @@ impl LocalActorApproval {
             warn!(path = %parent.display(), error = %err, "failed to create persistent local actor approval directory");
             return self.apply_actor_persistence(response);
         }
-        if let Err(err) = std::fs::write(&path, contents) {
+        if let Err(err) = codex_utils_path::write_atomically(&path, &contents) {
             warn!(path = %path.display(), error = %err, "failed to persist local actor approval");
         }
 

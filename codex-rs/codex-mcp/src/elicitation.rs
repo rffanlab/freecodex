@@ -357,6 +357,13 @@ impl ElicitationRequestManager {
                         });
                     }
 
+                    if let Some(response) = local_actor_approval
+                        .as_ref()
+                        .and_then(LocalActorApproval::persisted_response)
+                    {
+                        return Ok(response);
+                    }
+
                     if let Some(reviewer) = reviewer {
                         let request = ElicitationReviewRequest {
                             server_name: server_name.clone(),
@@ -367,13 +374,6 @@ impl ElicitationRequestManager {
                             return Ok(response);
                         }
                     }
-                }
-
-                if let Some(response) = local_actor_approval
-                    .as_ref()
-                    .and_then(LocalActorApproval::persisted_response)
-                {
-                    return Ok(response);
                 }
 
                 let Some(tx_event) = tx_event else {
