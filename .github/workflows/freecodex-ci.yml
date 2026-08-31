@@ -1,0 +1,218 @@
+name: FreeCodex CI
+
+on:
+  push:
+    branches:
+      - freecodex
+    paths:
+      - "codex-rs/**"
+      - ".github/workflows/freecodex-ci.yml"
+      - ".github/actions/setup-ci/**"
+      - ".github/actions/setup-rusty-v8/**"
+      - ".github/actions/setup-msvc-env/**"
+      - ".github/scripts/setup-dev-drive.ps1"
+  pull_request:
+    branches:
+      - freecodex
+    paths:
+      - "codex-rs/**"
+      - ".github/workflows/freecodex-ci.yml"
+      - ".github/actions/setup-ci/**"
+      - ".github/actions/setup-rusty-v8/**"
+      - ".github/actions/setup-msvc-env/**"
+      - ".github/scripts/setup-dev-drive.ps1"
+  workflow_dispatch:
+    inputs:
+      full_workspace_check:
+        description: "Run cargo check for the full workspace"
+        required: false
+        default: false
+        type: boolean
+      build_artifacts:
+        description: "Build Windows and Linux release artifacts"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freecodex-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  validate:
+    name: Validate FreeCodex
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare Codex CI environment
+        id: setup_ci
+        uses: ./.github/actions/setup-ci
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libcap-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+
+      - name: Cache Cargo data
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ steps.setup_ci.outputs.cargo-target-dir }}
+          key: freecodex-ci-linux-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            freecodex-ci-linux-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+            freecodex-ci-linux-
+
+      - name: Configure rusty_v8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      - name: Check formatting
+        run: cargo fmt -- --config imports_granularity=Item --check
+
+      - name: Check modified core packages
+        run: cargo check -p codex-mcp -p codex-core -p codex-cli --all-targets
+
+      - name: Test codex-mcp
+        run: cargo test -p codex-mcp
+
+      - name: Test codex-core
+        run: cargo test -p codex-core
+
+      - name: Full workspace check
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_workspace_check }}
+        run: cargo check --workspace --all-targets
+
+  build-artifacts:
+    name: Build artifact — ${{ matrix.name }}
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_artifacts }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: freecodex-linux-x64
+            executable: codex
+          - name: Windows x64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: freecodex-windows-x64
+            executable: codex.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare Codex CI environment
+        id: setup_ci
+        uses: ./.github/actions/setup-ci
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libcap-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Configure rusty_v8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Configure MSVC environment
+        if: ${{ runner.os == 'Windows' }}
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Cache Cargo data
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ steps.setup_ci.outputs.cargo-target-dir }}
+          key: freecodex-build-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            freecodex-build-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+            freecodex-build-${{ runner.os }}-${{ matrix.target }}-
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          fi
+          cargo build --release --target "${{ matrix.target }}" -p codex-cli --bin codex
+
+      - name: Smoke test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$CARGO_TARGET_DIR/${{ matrix.target }}/release/${{ matrix.executable }}" --version
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.artifact }}"
+          cp "$CARGO_TARGET_DIR/${{ matrix.target }}/release/${{ matrix.executable }}" \
+             "dist/${{ matrix.artifact }}/${{ matrix.executable }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: ${{ matrix.artifact }}-${{ github.sha }}
+          path: codex-rs/dist/${{ matrix.artifact }}/*
+          if-no-files-found: error
+          retention-days: 14
