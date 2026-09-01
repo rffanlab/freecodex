@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: freecodex
       - name: Decode and inspect patcher
         shell: bash
         run: |
@@ -28,9 +30,21 @@ jobs:
               raise SystemExit('PATCH_B64 not found')
           script = gzip.decompress(base64.b64decode(m.group(1))).decode()
           lines = script.splitlines()
+          needles = [
+              'provider_fallback',
+              'InternalSessionSource::Test',
+              'map_response_events(',
+              'fallback_provider',
+              'provider_fallbacks',
+          ]
+          shown = set()
           for i, line in enumerate(lines):
-              if 'http endpoint' in line or 'def replace_once' in line:
-                  lo=max(0,i-12); hi=min(len(lines),i+20)
+              if any(needle in line for needle in needles):
+                  lo=max(0,i-16); hi=min(len(lines),i+28)
+                  key=(lo,hi)
+                  if key in shown:
+                      continue
+                  shown.add(key)
                   print(f'--- lines {lo+1}-{hi} ---')
                   for n in range(lo,hi):
                       print(f'{n+1:04d}: {lines[n]}')
