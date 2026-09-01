@@ -55,6 +55,52 @@ jobs:
           rm tools/freecodex/apply_provider_fallback.py
           rmdir tools/freecodex 2>/dev/null || true
 
+      - name: Repair patched test call sites
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('codex-rs/core/src/client_tests.rs')
+          text = path.read_text()
+
+          for fn_name in [
+              'dropped_response_stream_traces_cancelled_partial_output',
+              'response_stream_records_last_model_feedback_ids',
+              'dropped_backpressured_response_stream_traces_cancelled_partial_output',
+          ]:
+              start = text.index(f'async fn {fn_name}')
+              next_attr = text.find('\n#[', start + 1)
+              if next_attr == -1:
+                  next_attr = len(text)
+              block = text[start:next_attr]
+              old = '        test_model_provider(),\n    );'
+              if block.count(old) != 1:
+                  raise SystemExit(
+                      f'{fn_name}: expected one old map_response_events tail, found {block.count(old)}'
+                  )
+              block = block.replace(
+                  old,
+                  '        test_model_provider(),\n'
+                  '        test_model_client(SessionSource::Cli),\n'
+                  '        /*turn_id*/ None,\n'
+                  '    );',
+                  1,
+              )
+              text = text[:start] + block + text[next_attr:]
+
+          invalid = 'SessionSource::Internal(InternalSessionSource::Test)'
+          if text.count(invalid) != 1:
+              raise SystemExit(
+                  f'expected one invalid InternalSessionSource::Test, found {text.count(invalid)}'
+              )
+          text = text.replace(invalid, 'SessionSource::Cli', 1)
+
+          path.write_text(text)
+          PY
+
       - name: Prepare Codex CI environment
         id: setup_ci
         uses: ./.github/actions/setup-ci
