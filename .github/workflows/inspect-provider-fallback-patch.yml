@@ -1,0 +1,37 @@
+name: Inspect provider fallback patch
+
+on:
+  push:
+    branches: [freecodex]
+    paths:
+      - ".github/workflows/inspect-provider-fallback-patch.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Decode and inspect patcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, pathlib, re
+          p = pathlib.Path('.github/workflows/apply-freecodex-provider-fallback.yml')
+          text = p.read_text()
+          m = re.search(r'^\s*PATCH_B64:\s*(\S+)\s*$', text, re.M)
+          if not m:
+              raise SystemExit('PATCH_B64 not found')
+          script = gzip.decompress(base64.b64decode(m.group(1))).decode()
+          lines = script.splitlines()
+          for i, line in enumerate(lines):
+              if 'http endpoint' in line or 'def replace_once' in line:
+                  lo=max(0,i-12); hi=min(len(lines),i+20)
+                  print(f'--- lines {lo+1}-{hi} ---')
+                  for n in range(lo,hi):
+                      print(f'{n+1:04d}: {lines[n]}')
+          PY
