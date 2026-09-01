@@ -1,0 +1,98 @@
+name: FreeCodex Windows x64 Build
+
+on:
+  push:
+    branches:
+      - freecodex
+    paths:
+      - ".github/workflows/freecodex-windows-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TARGET_DIR: C:/fc-target
+
+jobs:
+  build-windows-x64:
+    name: Build Windows x64 codex.exe
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - name: Checkout freecodex
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: freecodex
+          persist-credentials: false
+
+      - name: Enable Git long paths
+        shell: pwsh
+        run: git config --global core.longpaths true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Configure rusty_v8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Configure MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Build release codex.exe
+        shell: bash
+        env:
+          LIBSQLITE3_FLAGS: SQLITE_DISABLE_INTRINSIC
+        run: |
+          set -euo pipefail
+          cargo build \
+            --release \
+            --target x86_64-pc-windows-msvc \
+            -p codex-cli \
+            --bin codex
+
+      - name: Smoke test codex.exe
+        shell: pwsh
+        run: |
+          $exe = "C:\fc-target\x86_64-pc-windows-msvc\release\codex.exe"
+          if (-not (Test-Path $exe)) {
+            throw "codex.exe not found at $exe"
+          }
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "codex.exe --version failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Stage direct runtime artifact
+        shell: pwsh
+        run: |
+          $exe = "C:\fc-target\x86_64-pc-windows-msvc\release\codex.exe"
+          $stage = Join-Path $env:GITHUB_WORKSPACE "windows-runtime"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $exe (Join-Path $stage "codex.exe") -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+          "$hash  codex.exe" | Set-Content -Encoding ascii (Join-Path $stage "SHA256SUMS.txt")
+          Get-Item (Join-Path $stage "codex.exe") | Format-List FullName,Length,LastWriteTime
+          Get-Content (Join-Path $stage "SHA256SUMS.txt")
+
+      - name: Upload Windows runtime artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: freecodex-windows-x64-${{ github.sha }}
+          path: |
+            windows-runtime/codex.exe
+            windows-runtime/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
