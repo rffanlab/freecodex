@@ -2127,6 +2127,25 @@
       },
       "type": "object"
     },
+    "ModelProviderFallbackToml": {
+      "additionalProperties": false,
+      "description": "FreeCodex-only model provider failover configuration.",
+      "properties": {
+        "model": {
+          "description": "Model id to send to the fallback provider.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Provider id from the `model_providers` map.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "provider"
+      ],
+      "type": "object"
+    },
     "ModelProviderInfo": {
       "additionalProperties": false,
       "description": "Serializable representation of a provider definition.",
@@ -6476,6 +6495,14 @@
     "model_provider": {
       "description": "Provider to use from the model_providers map.",
       "type": "string"
+    },
+    "model_provider_fallback": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelProviderFallbackToml"
+        }
+      ],
+      "description": "FreeCodex-only fallback used when the primary provider reports a hard usage/quota exhaustion error. The referenced provider must be defined in `model_providers`."
     },
     "model_providers": {
       "additionalProperties": {

@@ -807,6 +807,8 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        test_model_client(SessionSource::Cli),
+        /*turn_id*/ None,
     );
 
     let observed = stream
@@ -858,6 +860,8 @@ async fn response_stream_records_last_model_feedback_ids() {
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
         test_model_provider(),
+        test_model_client(SessionSource::Cli),
+        /*turn_id*/ None,
     );
 
     while stream.next().await.is_some() {}
@@ -1079,6 +1083,8 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        test_model_client(SessionSource::Cli),
+        /*turn_id*/ None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
@@ -1348,4 +1354,74 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
         None,
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
+}
+
+fn test_model_client_with_provider_fallback() -> ModelClient {
+    let primary =
+        create_oss_provider_with_base_url("https://primary.example/v1", WireApi::Responses);
+    let fallback =
+        create_oss_provider_with_base_url("https://backup.example/v1", WireApi::Responses);
+    ModelClient::new(
+        /*auth_manager*/ None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        primary,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*content_item_kinds_enabled*/ true,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )
+    .with_provider_fallback(
+        /*auth_manager*/ None,
+        Some((fallback, "backup-model".to_string())),
+    )
+}
+
+#[test]
+fn provider_fallback_activates_only_for_hard_usage_exhaustion() {
+    let client = test_model_client_with_provider_fallback();
+
+    let temporary_rate_limit: CodexErr =
+        CodexErrorDetails::RateLimitExceeded("retry later".to_string()).into();
+    assert!(!client.try_activate_provider_fallback(&temporary_rate_limit, None));
+    assert!(!client.state.provider_fallback_active());
+
+    let quota_exceeded: CodexErr = CodexErrorDetails::QuotaExceeded.into();
+    assert!(client.try_activate_provider_fallback(&quota_exceeded, None));
+    assert!(client.state.provider_fallback_active());
+    assert_eq!(
+        client.state.active_provider().info().base_url.as_deref(),
+        Some("https://backup.example/v1")
+    );
+    assert_eq!(
+        client.state.effective_model("primary-model"),
+        "backup-model".to_string()
+    );
+
+    let usage_not_included: CodexErr = CodexErrorDetails::UsageNotIncluded.into();
+    assert!(!client.try_activate_provider_fallback(&usage_not_included, None));
+}
+
+#[test]
+fn provider_fallback_does_not_activate_for_unrelated_failures() {
+    for details in [
+        CodexErrorDetails::ServerOverloaded,
+        CodexErrorDetails::InternalServerError,
+        CodexErrorDetails::RateLimitExceeded("temporary".to_string()),
+    ] {
+        let client = test_model_client_with_provider_fallback();
+        let error: CodexErr = details.into();
+        assert!(!client.try_activate_provider_fallback(&error, None));
+        assert!(!client.state.provider_fallback_active());
+        assert_eq!(
+            client.state.active_provider().info().base_url.as_deref(),
+            Some("https://primary.example/v1")
+        );
+    }
 }

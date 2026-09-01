@@ -149,6 +149,16 @@ pub struct OrchestratorFeatureToml {
     pub enabled: Option<bool>,
 }
 
+/// FreeCodex-only model provider failover configuration.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ModelProviderFallbackToml {
+    /// Provider id from the `model_providers` map.
+    pub provider: String,
+    /// Model id to send to the fallback provider.
+    pub model: String,
+}
+
 /// Base config deserialized from ~/.codex/config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -160,6 +170,11 @@ pub struct ConfigToml {
 
     /// Provider to use from the model_providers map.
     pub model_provider: Option<String>,
+
+    /// FreeCodex-only fallback used when the primary provider reports a hard
+    /// usage/quota exhaustion error. The referenced provider must be defined
+    /// in `model_providers`.
+    pub model_provider_fallback: Option<ModelProviderFallbackToml>,
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,

@@ -14,11 +14,13 @@ use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state::ActiveTurn;
+use codex_config::config_toml::ModelProviderFallbackToml;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::RouteAwareClientPool;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::SharedModelProvider;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
@@ -34,6 +36,63 @@ use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_skills::SkillError;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
+
+fn resolve_freecodex_model_provider_fallback(
+    config: &Config,
+) -> std::io::Result<Option<(ModelProviderInfo, String)>> {
+    let fallback = config
+        .config_layer_stack
+        .effective_config()
+        .get("model_provider_fallback")
+        .cloned()
+        .map(|value| value.try_into::<ModelProviderFallbackToml>())
+        .transpose()
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid model_provider_fallback configuration: {error}"),
+            )
+        })?;
+    let Some(fallback) = fallback else {
+        return Ok(None);
+    };
+
+    let provider_id = fallback.provider.trim();
+    let model = fallback.model.trim();
+    if provider_id.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "model_provider_fallback.provider must not be empty",
+        ));
+    }
+    if model.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "model_provider_fallback.model must not be empty",
+        ));
+    }
+    if provider_id == config.model_provider_id {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "model_provider_fallback.provider must be different from the primary model_provider",
+        ));
+    }
+
+    let provider = config
+        .model_providers
+        .get(provider_id)
+        .cloned()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "model_provider_fallback references unknown model provider `{provider_id}`"
+                ),
+            )
+        })?;
+
+    Ok(Some((provider, model.to_string())))
+}
 
 /// Context for an initialized model agent
 ///
@@ -1377,6 +1436,8 @@ impl Session {
                 .features
                 .enabled(Feature::ExecutedToolCallMetadata)
                 .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
+            let model_provider_fallback =
+                resolve_freecodex_model_provider_fallback(config.as_ref())?;
             let services = SessionServices {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
@@ -1451,6 +1512,10 @@ impl Session {
                         .enabled(Feature::ConcurrentReasoningSummaries),
                     attestation_provider,
                     config.http_client_factory(),
+                )
+                .with_provider_fallback(
+                    Some(Arc::clone(&auth_manager)),
+                    model_provider_fallback,
                 )
                 .with_free_guardian_enabled(config.free_guardian_enabled())
                 .with_session_context(
