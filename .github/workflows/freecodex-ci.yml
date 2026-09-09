@@ -19,9 +19,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: freecodex
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Repair and restore CI
+      - name: Repair Rust source
         shell: bash
         run: |
           set -euo pipefail
@@ -64,11 +64,8 @@ jobs:
           path.write_text(text.replace(notify_old, notify_new, 1))
           PY
 
-          git show 01cb5b6a22c091188e759e9cd91ad95c729034be:.github/workflows/freecodex-ci.yml > .github/workflows/freecodex-ci.yml
-          rm -f .github/workflows/freecodex-fix-session-merge-once.yml
           git config user.name 'freecodex-fix-bot'
           git config user.email 'freecodex-fix-bot@users.noreply.github.com'
-          git add codex-rs/core/src/session/mod.rs .github/workflows/freecodex-ci.yml
-          git add -u .github/workflows/freecodex-fix-session-merge-once.yml || true
+          git add codex-rs/core/src/session/mod.rs
           git commit -m 'fix(core): resolve request permissions merge conflict'
           git push origin HEAD:freecodex
