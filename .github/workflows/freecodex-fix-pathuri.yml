@@ -1,4 +1,4 @@
-name: FreeCodex Fix TUI Merge
+name: FreeCodex Fix TUI Formatting
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
           ref: freecodex
           fetch-depth: 0
 
-      - name: Merge upstream speech cells with FreeCodex timestamps
+      - name: Apply rustfmt-compatible speech marker formatting
         shell: bash
         run: |
           set -euo pipefail
@@ -28,51 +28,12 @@ jobs:
           from pathlib import Path
           path = Path('codex-rs/tui/src/history_cell/messages.rs')
           text = path.read_text()
-
-          def replace_one(old, new, label):
-              global text
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
-              text = text.replace(old, new, 1)
-
-          replace_one(
-              '    pub remote_image_urls: Vec<String>,\n    pub timestamp: Option<MessageTimestamp>,\n',
-              '    pub remote_image_urls: Vec<String>,\n    pub(crate) spoken: bool,\n    pub timestamp: Option<MessageTimestamp>,\n',
-              'UserHistoryCell spoken field',
-          )
-          replace_one(
-              '                message_initial_indent("› ".bold().dim(), self.timestamp.as_ref()),\n',
-              '                message_initial_indent(if self.spoken { "› ".red().bold() } else { "› ".bold().dim() }, self.timestamp.as_ref()),\n',
-              'spoken user marker',
-          )
-          replace_one(
-              '    rendered_lines: Option<MarkdownRenderCache>,\n    timestamp: Option<MessageTimestamp>,\n',
-              '    rendered_lines: Option<MarkdownRenderCache>,\n    spoken_artifacts: bool,\n    timestamp: Option<MessageTimestamp>,\n',
-              'AgentMarkdownCell spoken_artifacts field',
-          )
-          replace_one(
-              '    #[cfg(test)]\n    pub(crate) fn new_with_inline_visualizations(\n',
-              '    pub(crate) fn new_with_inline_visualizations(\n',
-              'runtime inline visualization constructor',
-          )
-          replace_one(
-              '            inline_visualization_context,\n            rendered_lines,\n            timestamp,\n',
-              '            inline_visualization_context,\n            rendered_lines,\n            spoken_artifacts: false,\n            timestamp,\n',
-              'AgentMarkdownCell constructor init',
-          )
-          replace_one(
-              '            );\n            normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(\n                lines,\n                message_initial_indent("• ".dim(), self.timestamp.as_ref()),\n',
-              '            );\n            let lines = if self.spoken_artifacts {\n                let mut lines = lines;\n                super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);\n                lines\n            } else {\n                lines\n            };\n            normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(\n                lines,\n                message_initial_indent("• ".dim(), self.timestamp.as_ref()),\n',
-              'spoken assistant artifact rendering',
-          )
-          replace_one(
-              '        remote_image_urls,\n        timestamp: None,\n    }\n}\n\npub(crate) fn new_timestamped_user_prompt(\n',
-              '        remote_image_urls,\n        spoken: false,\n        timestamp: None,\n    }\n}\n\npub(crate) fn new_spoken_user_prompt(message: String) -> UserHistoryCell {\n    let mut cell = new_user_prompt(message, Vec::new(), Vec::new(), Vec::new());\n    cell.spoken = true;\n    cell\n}\n\npub(crate) fn new_timestamped_user_prompt(\n',
-              'user prompt constructors',
-          )
-
-          path.write_text(text)
+          old = '                message_initial_indent(if self.spoken { "› ".red().bold() } else { "› ".bold().dim() }, self.timestamp.as_ref()),\n'
+          new = '                message_initial_indent(\n                    if self.spoken {\n                        "› ".red().bold()\n                    } else {\n                        "› ".bold().dim()\n                    },\n                    self.timestamp.as_ref(),\n                ),\n'
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'expected exactly one unformatted speech marker, found {count}')
+          path.write_text(text.replace(old, new, 1))
           PY
 
           git diff --check
@@ -80,5 +41,5 @@ jobs:
           git config user.name "freecodex-fix-bot"
           git config user.email "freecodex-fix-bot@users.noreply.github.com"
           git add codex-rs/tui/src/history_cell/messages.rs
-          git commit -m "fix(tui): merge speech cells with message timestamps"
+          git commit -m "style(tui): format speech timestamp marker"
           git push origin HEAD:freecodex
