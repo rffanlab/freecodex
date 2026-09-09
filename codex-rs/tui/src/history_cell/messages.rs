@@ -92,6 +92,7 @@ pub(crate) struct UserHistoryCell {
     #[allow(dead_code)]
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
+    pub(crate) spoken: bool,
     pub timestamp: Option<MessageTimestamp>,
 }
 
@@ -351,7 +352,7 @@ impl HistoryCell for UserHistoryCell {
         if let Some(wrapped_message) = wrapped_message {
             lines.extend(prefix_message_hyperlink_lines(
                 wrapped_message,
-                message_initial_indent("› ".bold().dim(), self.timestamp.as_ref()),
+                message_initial_indent(if self.spoken { "› ".red().bold() } else { "› ".bold().dim() }, self.timestamp.as_ref()),
                 message_subsequent_indent(self.timestamp.as_ref()),
             ));
         }
@@ -545,6 +546,7 @@ pub(crate) struct AgentMarkdownCell {
     cwd: PathBuf,
     inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
     rendered_lines: Option<MarkdownRenderCache>,
+    spoken_artifacts: bool,
     timestamp: Option<MessageTimestamp>,
 }
 
@@ -563,7 +565,6 @@ impl AgentMarkdownCell {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn new_with_inline_visualizations(
         markdown_source: String,
         cwd: &Path,
@@ -595,6 +596,7 @@ impl AgentMarkdownCell {
             cwd: cwd.to_path_buf(),
             inline_visualization_context,
             rendered_lines,
+            spoken_artifacts: false,
             timestamp,
         }
     }
@@ -655,6 +657,13 @@ impl HistoryCell for AgentMarkdownCell {
                 Some(self.cwd.as_path()),
                 self.inline_visualization_context.as_ref(),
             );
+            let lines = if self.spoken_artifacts {
+                let mut lines = lines;
+                super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);
+                lines
+            } else {
+                lines
+            };
             normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(
                 lines,
                 message_initial_indent("• ".dim(), self.timestamp.as_ref()),
@@ -763,8 +772,15 @@ pub(crate) fn new_user_prompt(
         text_elements,
         local_image_paths,
         remote_image_urls,
+        spoken: false,
         timestamp: None,
     }
+}
+
+pub(crate) fn new_spoken_user_prompt(message: String) -> UserHistoryCell {
+    let mut cell = new_user_prompt(message, Vec::new(), Vec::new(), Vec::new());
+    cell.spoken = true;
+    cell
 }
 
 pub(crate) fn new_timestamped_user_prompt(
