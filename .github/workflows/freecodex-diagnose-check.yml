@@ -1,0 +1,87 @@
+name: FreeCodex Diagnose Check
+
+on:
+  push:
+    branches:
+      - freecodex
+    paths:
+      - .github/workflows/freecodex-diagnose-check.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Prepare Codex CI environment
+        id: setup_ci
+        uses: ./.github/actions/setup-ci
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential pkg-config libcap-dev >/dev/null
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          components: rustfmt
+
+      - name: Cache Cargo data
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ steps.setup_ci.outputs.cargo-target-dir }}
+          key: freecodex-ci-linux-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            freecodex-ci-linux-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+            freecodex-ci-linux-
+
+      - name: Configure rusty_v8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      - name: Diagnose modified core packages
+        shell: bash
+        run: |
+          set +e
+          cargo check -p codex-mcp -p codex-core -p codex-cli --all-targets > /tmp/freecodex-check.log 2>&1
+          status=$?
+          echo "===== FREECODEX CURRENT ERRORS ====="
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('/tmp/freecodex-check.log').read_text(errors='replace').splitlines()
+          hits = [i for i, line in enumerate(lines) if 'error[E' in line or line.startswith('error:')]
+          if not hits:
+              print('NO RUST ERROR BLOCKS FOUND')
+          else:
+              ranges = []
+              for i in hits:
+                  a, b = max(0, i - 3), min(len(lines), i + 24)
+                  if ranges and a <= ranges[-1][1]:
+                      ranges[-1] = (ranges[-1][0], max(ranges[-1][1], b))
+                  else:
+                      ranges.append((a, b))
+              for a, b in ranges:
+                  print('\n'.join(lines[a:b]))
+                  print('-----')
+          print('===== END FREECODEX CURRENT ERRORS =====')
+          PY
+          exit "$status"
