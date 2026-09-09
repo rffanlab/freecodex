@@ -2936,42 +2936,20 @@ impl Session {
                     permissions,
                     scope,
                     strict_auto_review: false,
-                },
-                ReviewDecision::NetworkPolicyAmendment {
-                    network_policy_amendment,
-                } => match network_policy_amendment.action {
-                    NetworkPolicyRuleAction::Allow => RequestPermissionsResponse {
-                        permissions: requested_permissions.clone(),
-                        scope: PermissionGrantScope::Turn,
-                        strict_auto_review: false,
-                    },
-                    NetworkPolicyRuleAction::Deny => RequestPermissionsResponse {
-                        permissions: RequestPermissionProfile::default(),
-                        scope: PermissionGrantScope::Turn,
-                        strict_auto_review: false,
-                    },
-                },
-                ReviewDecision::ApprovedMcpPolicyAmendment
-                | ReviewDecision::Abort
-                | ReviewDecision::Denied { .. }
-                | ReviewDecision::TimedOut => RequestPermissionsResponse {
-                    permissions: RequestPermissionProfile::default(),
-                    scope: PermissionGrantScope::Turn,
-                    strict_auto_review: false,
-                },
-            };
-            let response = Self::normalize_request_permissions_response(
-                requested_permissions,
-                response,
-                native_environment_cwd.as_path(),
-            );
-            self.record_granted_request_permissions_for_turn(
-                &response,
-                &environment,
-                originating_turn_state.as_ref(),
-            )
-            .await;
-            return Some(response);
+                };
+                let response = Self::normalize_request_permissions_response(
+                    requested_permissions,
+                    response,
+                    &context,
+                );
+                self.record_granted_request_permissions_for_turn(
+                    &response,
+                    &environment.selection,
+                    originating_turn_state.as_ref(),
+                )
+                .await;
+                return Some(response);
+            }
         }
 
         let _elicitation = self.services.elicitations.register();
@@ -3141,7 +3119,7 @@ impl Session {
                 };
                 self.record_granted_request_permissions_for_turn(
                     &response,
-                    &entry.environment,
+                    &entry.environment.selection,
                     originating_turn_state.as_ref(),
                 )
                 .await;
