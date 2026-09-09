@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: freecodex
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Repair and restore CI
         shell: bash
@@ -27,91 +27,44 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-
-          path = Path('codex-rs/core/src/session/mod.rs')
+          path = Path("codex-rs/core/src/session/mod.rs")
           text = path.read_text()
-          broken = '''                let response = RequestPermissionsResponse {
-                    permissions,
-                    scope,
-                    strict_auto_review: false,
-                },
-                ReviewDecision::NetworkPolicyAmendment {
-                    network_policy_amendment,
-                } => match network_policy_amendment.action {
-                    NetworkPolicyRuleAction::Allow => RequestPermissionsResponse {
-                        permissions: requested_permissions.clone(),
-                        scope: PermissionGrantScope::Turn,
-                        strict_auto_review: false,
-                    },
-                    NetworkPolicyRuleAction::Deny => RequestPermissionsResponse {
-                        permissions: RequestPermissionProfile::default(),
-                        scope: PermissionGrantScope::Turn,
-                        strict_auto_review: false,
-                    },
-                },
-                ReviewDecision::ApprovedMcpPolicyAmendment
-                | ReviewDecision::Abort
-                | ReviewDecision::Denied { .. }
-                | ReviewDecision::TimedOut => RequestPermissionsResponse {
-                    permissions: RequestPermissionProfile::default(),
-                    scope: PermissionGrantScope::Turn,
-                    strict_auto_review: false,
-                },
-            };
-            let response = Self::normalize_request_permissions_response(
-                requested_permissions,
-                response,
-                native_environment_cwd.as_path(),
-            );
-            self.record_granted_request_permissions_for_turn(
-                &response,
-                &environment,
-                originating_turn_state.as_ref(),
-            )
-            .await;
-            return Some(response);
-        }
-'''
-          fixed = '''                let response = RequestPermissionsResponse {
-                    permissions,
-                    scope,
-                    strict_auto_review: false,
-                };
-                let response = Self::normalize_request_permissions_response(
-                    requested_permissions,
-                    response,
-                    &context,
-                );
-                self.record_granted_request_permissions_for_turn(
-                    &response,
-                    &environment.selection,
-                    originating_turn_state.as_ref(),
-                )
-                .await;
-                return Some(response);
-            }
-'''
-          count = text.count(broken)
-          if count != 1:
-              raise SystemExit(f'expected exactly one broken merged block, found {count}')
-          text = text.replace(broken, fixed)
-          old_notify = '''                self.record_granted_request_permissions_for_turn(
-                    &response,
-                    &entry.environment,
-                    originating_turn_state.as_ref(),
-                )'''
-          new_notify = '''                self.record_granted_request_permissions_for_turn(
-                    &response,
-                    &entry.environment.selection,
-                    originating_turn_state.as_ref(),
-                )'''
-          count = text.count(old_notify)
-          if count != 1:
-              raise SystemExit(f'expected exactly one legacy notify call, found {count}')
-          path.write_text(text.replace(old_notify, new_notify, 1))
+          anchor = "                let (permissions, scope) = match decision {\n"
+          anchor_pos = text.index(anchor)
+          start = text.index("                let response = RequestPermissionsResponse {\n", anchor_pos)
+          end_marker = "        let _elicitation = self.services.elicitations.register();\n"
+          end = text.index(end_marker, start)
+          replacement = "\n".join([
+              "                let response = RequestPermissionsResponse {",
+              "                    permissions,",
+              "                    scope,",
+              "                    strict_auto_review: false,",
+              "                };",
+              "                let response = Self::normalize_request_permissions_response(",
+              "                    requested_permissions,",
+              "                    response,",
+              "                    &context,",
+              "                );",
+              "                self.record_granted_request_permissions_for_turn(",
+              "                    &response,",
+              "                    &environment.selection,",
+              "                    originating_turn_state.as_ref(),",
+              "                )",
+              "                .await;",
+              "                return Some(response);",
+              "            }",
+              "        }",
+              "",
+          ]) + "\n"
+          text = text[:start] + replacement + text[end:]
+          notify_old = "                    &entry.environment,\n                    originating_turn_state.as_ref(),"
+          notify_new = "                    &entry.environment.selection,\n                    originating_turn_state.as_ref(),"
+          if text.count(notify_old) != 1:
+              raise SystemExit(f"expected one legacy notify call, found {text.count(notify_old)}")
+          path.write_text(text.replace(notify_old, notify_new, 1))
           PY
 
-          git show HEAD^:.github/workflows/freecodex-ci.yml > .github/workflows/freecodex-ci.yml
+          git show 01cb5b6a22c091188e759e9cd91ad95c729034be:.github/workflows/freecodex-ci.yml > .github/workflows/freecodex-ci.yml
           rm -f .github/workflows/freecodex-fix-session-merge-once.yml
           git config user.name 'freecodex-fix-bot'
           git config user.email 'freecodex-fix-bot@users.noreply.github.com'
