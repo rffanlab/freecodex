@@ -1,0 +1,62 @@
+name: FreeCodex Fix PathUri Compatibility
+
+on:
+  push:
+    branches:
+      - freecodex
+    paths:
+      - .github/workflows/freecodex-fix-pathuri.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: freecodex
+          fetch-depth: 0
+
+      - name: Patch PathUri compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('codex-rs/core/src/tools/handlers/mod.rs')
+          text = path.read_text()
+
+          old_import = 'use std::path::Path;\n\n'
+          if old_import not in text:
+              raise SystemExit('expected std::path::Path import not found')
+          text = text.replace(old_import, '', 1)
+
+          old_sig = '''pub(super) async fn apply_granted_turn_permissions(
+              session: &Session,
+              environment: &crate::session::turn_context::TurnEnvironment,
+              cwd: &Path,
+          '''
+          new_sig = '''pub(super) async fn apply_granted_turn_permissions(
+              session: &Session,
+              environment: &TurnEnvironment,
+              cwd: &PathUri,
+          '''
+          if old_sig not in text:
+              raise SystemExit('expected apply_granted_turn_permissions signature not found')
+          text = text.replace(old_sig, new_sig, 1)
+
+          path.write_text(text)
+          PY
+
+          git diff --check
+          git diff -- codex-rs/core/src/tools/handlers/mod.rs
+
+          git config user.name "freecodex-fix-bot"
+          git config user.email "freecodex-fix-bot@users.noreply.github.com"
+          git add codex-rs/core/src/tools/handlers/mod.rs
+          git commit -m "fix(core): align granted permission cwd with PathUri"
+          git push origin HEAD:freecodex
