@@ -1,0 +1,73 @@
+name: FreeCodex Fix CI Batch 4
+
+on:
+  push:
+    branches:
+      - freecodex
+    paths:
+      - ".github/workflows/freecodex-fix-ci-batch4.yml"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  fix-and-check:
+    if: ${{ contains(github.event.head_commit.message, 'formatting fixes batch 4') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout freecodex
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: freecodex
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          components: rustfmt
+
+      - name: Format and push fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd codex-rs
+          cargo fmt
+          cd ..
+          rm .github/workflows/freecodex-fix-ci-batch4.yml
+          git config user.name "freecodex-fix-bot"
+          git config user.email "freecodex-fix-bot@users.noreply.github.com"
+          git add codex-rs .github/workflows/freecodex-fix-ci-batch4.yml
+          git commit -m "style: format upstream compatibility fixes"
+          git push origin HEAD:freecodex
+
+      - name: Prepare Codex CI environment
+        id: setup_ci
+        uses: ./.github/actions/setup-ci
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libcap-dev
+
+      - name: Configure rusty_v8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      - name: Check formatting
+        working-directory: codex-rs
+        run: cargo fmt -- --config imports_granularity=Item --check
+
+      - name: Check modified core packages
+        working-directory: codex-rs
+        run: cargo check -p codex-mcp -p codex-core -p codex-cli --all-targets
