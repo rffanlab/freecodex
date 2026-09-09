@@ -25,6 +25,7 @@ use crate::facts::TurnStatus;
 use crate::facts::TurnSteerRejectionReason;
 use crate::facts::TurnSteerResult;
 use crate::facts::TurnSubmissionType;
+use crate::guardian_v2::GuardianV2EventRequest;
 use crate::now_unix_millis;
 use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::CommandExecutionSource;
@@ -69,11 +70,13 @@ pub(crate) enum TrackEventRequest {
     ThreadInitialized(ThreadInitializedEvent),
     ThreadArchive(ThreadArchiveEvent),
     GuardianReview(Box<GuardianReviewEventRequest>),
+    GuardianV2(Box<GuardianV2EventRequest>),
     AppMentioned(CodexAppMentionedEventRequest),
     AppUsed(CodexAppUsedEventRequest),
     HookRun(CodexHookRunEventRequest),
     Compaction(Box<CodexCompactionEventRequest>),
     Goal(Box<CodexGoalEventRequest>),
+    ThreadHintStatus(Box<crate::thread_hint::ThreadHintStatusEventRequest>),
     TurnEvent(Box<CodexTurnEventRequest>),
     TurnSteer(CodexTurnSteerEventRequest),
     ArtifactOperation(CodexArtifactOperationEventRequest),
@@ -238,6 +241,8 @@ pub(crate) struct ThreadInitializedEventParams {
     pub(crate) runtime: CodexRuntimeMetadata,
     pub(crate) model: String,
     pub(crate) ephemeral: bool,
+    /// Whether the thread's checkout is a validated linked Git worktree, if known.
+    pub(crate) is_worktree: Option<bool>,
     pub(crate) thread_source: Option<ThreadSource>,
     pub(crate) initialization_mode: ThreadInitializationMode,
     pub(crate) subagent_source: Option<String>,
@@ -775,6 +780,7 @@ pub(crate) struct CodexPluginMeasurementEventParams {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
     pub(crate) item_id: String,
+    pub(crate) originator: String,
     pub(crate) plugin_id: String,
     pub(crate) execution_id: String,
     pub(crate) operation: String,
@@ -897,6 +903,7 @@ pub(crate) struct CodexImageGenerationEventParams {
     pub(crate) saved_path_present: bool,
     pub(crate) transparent_background: Option<bool>,
     pub(crate) imagegen_request_id: Option<String>,
+    pub(crate) generation_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1012,6 +1019,8 @@ pub(crate) struct CodexTurnEventParams {
     pub(crate) session_id: String,
     pub(crate) turn_id: String,
     pub(crate) root_turn_id: Option<String>,
+    pub(crate) turn_trigger: Option<String>,
+    pub(crate) codex_turn_source: Option<String>,
     // TODO(rhan-oai): Populate once queued/default submission type is plumbed from
     // the turn/start callsites instead of always being reported as None.
     pub(crate) submission_type: Option<TurnSubmissionType>,
@@ -1030,6 +1039,7 @@ pub(crate) struct CodexTurnEventParams {
     pub(crate) service_tier: String,
     pub(crate) approval_policy: String,
     pub(crate) approvals_reviewer: String,
+    pub(crate) guardian_v2_enabled: bool,
     pub(crate) sandbox_network_access: bool,
     pub(crate) collaboration_mode: Option<&'static str>,
     pub(crate) personality: Option<String>,
@@ -1458,6 +1468,7 @@ pub(crate) fn subagent_thread_started_event_request(
         runtime: current_runtime_metadata(),
         model: input.model,
         ephemeral: input.ephemeral,
+        is_worktree: None,
         thread_source: input.thread_source,
         initialization_mode: ThreadInitializationMode::New,
         subagent_source: Some(subagent_source_name(&input.subagent_source)),

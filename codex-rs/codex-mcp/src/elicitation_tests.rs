@@ -134,7 +134,11 @@ fn elicitation_fixture(
         ElicitationRequestRouter::default(),
     );
     let (tx_event, events) = async_channel::bounded(1);
-    let sender = manager.make_sender("independent-mcp".to_string(), Some(tx_event));
+    let sender = manager.make_sender(
+        "independent-mcp".to_string(),
+        Some(tx_event),
+        &ClientMcpExtensions::default(),
+    );
     (manager, events, sender)
 }
 
@@ -252,7 +256,11 @@ async fn strict_auto_review_respects_explicit_elicitation_denials() {
                 ("independent-mcp", Some(json!(false))),
                 ("another-independent-mcp", None),
             ] {
-                let sender = manager.make_sender(server_name.into(), /*tx_event*/ None);
+                let sender = manager.make_sender(
+                    server_name.into(),
+                    /*tx_event*/ None,
+                    &ClientMcpExtensions::default(),
+                );
                 assert_eq!(
                     send_elicitation(&sender, marker).await,
                     ElicitationResponse {
@@ -376,10 +384,15 @@ async fn reused_elicitation_senders_follow_each_servers_latest_permission_author
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),
     );
-    let attached = manager.make_sender("attached".to_string(), /*tx_event*/ None);
+    let attached = manager.make_sender(
+        "attached".to_string(),
+        /*tx_event*/ None,
+        &ClientMcpExtensions::default(),
+    );
     let hosted = manager.make_sender(
         crate::CODEX_APPS_MCP_SERVER_NAME.to_string(),
         /*tx_event*/ None,
+        &ClientMcpExtensions::default(),
     );
 
     assert_eq!(

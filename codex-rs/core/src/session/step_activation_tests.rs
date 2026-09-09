@@ -277,6 +277,8 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
             .as_mut()
             .expect("model messages")
             .token_budget = Some(ModelTokenBudgetConfig {
+            enabled: false,
+            use_history_notes_extension: false,
             reminder_threshold_tokens: 2_000,
             reminder_message_template: "{n_remaining} tokens remain.".to_string(),
             guidance_message: format!("Guidance for {}.", model.slug),
@@ -431,6 +433,27 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
         ]
     );
     assert!(Arc::ptr_eq(&before.turn, &after.turn));
+    assert_eq!(
+        turn.to_turn_context_item().summary,
+        ReasoningSummary::Concise
+    );
+    // Even after the live update, an already-captured request retains its own
+    // summary setting in the durable context.
+    for step in [&before, &during, &after] {
+        let world_state = session
+            .record_context_updates_and_set_reference_context_item(step)
+            .await
+            .expect("record captured settings");
+        assert_eq!(
+            session.reference_context_item().await.unwrap().summary,
+            step.settings.reasoning_summary,
+        );
+        session.start_new_context_window(step, world_state).await;
+        assert_eq!(
+            session.reference_context_item().await.unwrap().summary,
+            step.settings.reasoning_summary,
+        );
+    }
     assert_eq!(after.settings.model_info.as_ref(), &expected_destination);
     let initial_budget = turn
         .config
@@ -603,6 +626,60 @@ async fn delayed_activation_does_not_retarget_a_task(change: TaskChangeDuringLoo
 enum ManagedAuthorizationChange {
     ApprovalPolicy,
     ApprovalsReviewer,
+}
+
+#[test_case(false; "reviewer allow-list")]
+#[test_case(true; "model-required review")]
+#[tokio::test]
+async fn reviewer_only_activation_enforces_managed_authority(required_review: bool) {
+    let ActivationFixture { session, turn, .. } = activation_fixture(activation_models()).await;
+    let original = turn.current_settings.load_full();
+    let desired = desired_step_settings(&session).await;
+    let source = RequirementSource::Unknown;
+    let mut sourced = ConfigRequirementsWithSources::default();
+    let reviewer = if required_review {
+        sourced.auto_review = Some(Sourced::new(
+            AutoReviewRequirementsToml {
+                required_on_models: Some(vec![turn.model_info().slug.clone()]),
+                ..Default::default()
+            },
+            source,
+        ));
+        ApprovalsReviewer::User
+    } else {
+        sourced.allowed_approvals_reviewers =
+            Some(Sourced::new(vec![ApprovalsReviewer::User], source));
+        ApprovalsReviewer::AutoReview
+    };
+    {
+        let mut state = session.state.lock().await;
+        let config = Arc::make_mut(&mut state.session_configuration.original_config_do_not_use);
+        config.config_layer_stack = ConfigLayerStack::new(
+            config
+                .config_layer_stack
+                .all_layers_low_to_high()
+                .cloned()
+                .collect(),
+            ConfigRequirements::try_from(sourced.clone()).expect("managed requirements"),
+            sourced.into_toml(),
+        )
+        .expect("managed config stack");
+    }
+    assert!(matches!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    approvals_reviewer: Some(reviewer),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Rejected { .. }
+    ));
+    assert!(Arc::ptr_eq(&turn.current_settings.load_full(), &original));
+    assert_eq!(desired_step_settings(&session).await, desired);
+    session.abort_all_tasks(TurnAbortReason::Replaced).await;
 }
 
 #[test_case(ManagedAuthorizationChange::ApprovalPolicy; "approval policy refreshed during lookup")]
@@ -859,6 +936,7 @@ fn parent_review_messages(model: &mut ModelInfo) -> &mut AutoReviewMessages {
         .get_or_insert(AutoReviewMessages {
             policy: None,
             policy_template: None,
+            node_repl_policy: None,
             rejection_instructions: None,
             timeout_instructions: None,
         })
@@ -994,6 +1072,11 @@ async fn parent_fallback_preserves_explicit_empty_and_bundled_defaults() {
     );
     parent_review_messages(&mut destination).policy = None;
     assert_eq!(check(&destination), Ok(()));
+    parent_review_messages(&mut destination).node_repl_policy = Some(String::new());
+    assert_eq!(
+        check(&destination),
+        Err("the destination changes the Guardian parent-fallback node REPL policy".to_string())
+    );
 }
 
 #[tokio::test]
@@ -1006,6 +1089,7 @@ async fn unchanged_explicit_reviewer_does_not_use_parent_policy() {
     parent_review_messages(&mut admitted).policy = Some("catalog policy A".to_string());
     parent_review_messages(&mut destination).policy = Some("catalog policy B".to_string());
     parent_review_messages(&mut destination).policy_template = Some(String::new());
+    parent_review_messages(&mut destination).node_repl_policy = Some(String::new());
     assert_eq!(
         check_legacy_model_safety(
             &admitted,

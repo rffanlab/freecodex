@@ -1,4 +1,5 @@
 //! User, assistant, reasoning, and streaming message history cells.
+//! Completed reasoning is retained in the expanded transcript, not compact scrollback.
 
 use super::markdown_render_cache::MarkdownRenderCache;
 use super::*;
@@ -234,8 +235,14 @@ impl HistoryCell for UserHistoryCell {
     }
 
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        let message = sanitize_user_text((&self.message).into());
-        let text_elements = if message.as_ref() == self.message {
+        let sanitized_message = sanitize_user_text((&self.message).into());
+        // Speech transcripts can begin with whitespace; the marker already supplies its separator.
+        let message = if self.spoken {
+            sanitized_message.trim_start()
+        } else {
+            sanitized_message.as_ref()
+        };
+        let text_elements = if message == self.message {
             self.text_elements.as_slice()
         } else {
             &[]
@@ -285,7 +292,7 @@ impl HistoryCell for UserHistoryCell {
             } else {
                 adaptive_wrap_lines(
                     build_user_message_lines_with_elements(
-                        message.as_ref(),
+                        message,
                         text_elements,
                         style,
                         element_style,
@@ -591,6 +598,16 @@ impl AgentMarkdownCell {
             timestamp,
         }
     }
+
+    pub(crate) fn new_spoken(markdown_source: String, cwd: &Path) -> Self {
+        let mut cell = Self::new_with_inline_visualizations(
+            markdown_source,
+            cwd,
+            /*inline_visualization_context*/ None,
+        );
+        cell.spoken_artifacts = true;
+        cell
+    }
 }
 
 fn normalize_whitespace_only_hyperlink_lines(mut lines: Vec<HyperlinkLine>) -> Vec<HyperlinkLine> {
@@ -771,16 +788,8 @@ pub(crate) fn new_reasoning_summary_block(
     cwd: &Path,
 ) -> Box<dyn HistoryCell> {
     let (header, content) = split_reasoning_summary_parts(&reasoning_parts);
-    let title_only = content
-        .strip_prefix("**")
-        .and_then(|content| content.strip_suffix("**"))
-        .is_some_and(|content| !content.is_empty() && !content.contains("**"));
-    let transcript_only = header.is_empty() && !title_only;
     Box::new(ReasoningSummaryCell::new(
-        header,
-        content,
-        cwd,
-        transcript_only,
+        header, content, cwd, /*transcript_only*/ true,
     ))
 }
 

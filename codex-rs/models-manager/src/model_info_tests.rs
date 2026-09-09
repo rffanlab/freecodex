@@ -42,6 +42,7 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
     let auto_review = AutoReviewMessages {
         policy: Some("review policy".to_string()),
         policy_template: Some("review policy template".to_string()),
+        node_repl_policy: None,
         rejection_instructions: Some("rejection instructions".to_string()),
         timeout_instructions: Some(String::new()),
     };
@@ -62,6 +63,8 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         }),
     };
     let token_budget = ModelTokenBudgetConfig {
+        enabled: false,
+        use_history_notes_extension: false,
         reminder_threshold_tokens: 128,
         reminder_message_template: "budget reminder".to_string(),
         guidance_message: "budget guidance".to_string(),

@@ -543,6 +543,7 @@ async fn user_turn_personality_skips_if_feature_disabled() -> anyhow::Result<()>
     let mut builder = test_codex()
         .with_model("exp-codex-personality")
         .with_config(|config| {
+            config.update_plan_enabled = true;
             config
                 .features
                 .disable(Feature::Personality)
@@ -671,7 +672,9 @@ async fn remote_model_friendly_personality_instructions_with_feature() -> anyhow
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        supports_experimental_context: false,
         use_responses_lite: false,
+        guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
         auto_review_model_override: None,
@@ -801,7 +804,9 @@ async fn user_turn_personality_remote_model_template_includes_update_message() -
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        supports_experimental_context: false,
         use_responses_lite: false,
+        guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
         auto_review_model_override: None,

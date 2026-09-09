@@ -284,6 +284,11 @@ impl CoreToolRuntime for McpHandler {
     }
 
     fn on_tool_result_accepted(&self, invocation: &ToolInvocation, result: &dyn ToolOutput) {
+        invocation
+            .session
+            .services
+            .executed_tool_calls
+            .record_accepted_result(&invocation.source, &invocation.call_id, result);
         let ToolCallSource::CodeMode { cell_id, .. } = &invocation.source else {
             return;
         };

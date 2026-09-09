@@ -88,12 +88,8 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
     let child = test
         .thread_manager
         .fork_prepared_thread(
-            test.config.clone(),
+            codex_core::StartThreadOptions::new(test.config.clone()),
             prepared,
-            /*thread_source*/ None,
-            /*parent_trace*/ None,
-            ClientMcpExtensions::default(),
-            /*reserved_thread_id*/ None,
         )
         .await?;
     turn(
@@ -140,9 +136,6 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
     config
         .features
         .enable(Feature::LocalThreadStoreCompression)?;
-    config
-        .features
-        .enable(Feature::LocalThreadStoreSharedCompression)?;
     // Use production feature wiring, rather than manually writing zstd files or calling the worker.
     let store =
         codex_core::thread_store_from_config(&config, codex_core::init_state_db(&config).await);

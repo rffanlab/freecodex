@@ -107,6 +107,7 @@ const FOOTER_CONTEXT_GAP_COLS: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FooterKeyHints {
+    pub(crate) agents: Option<ShortcutHint>,
     pub(crate) toggle_shortcuts: Option<ShortcutHint>,
     pub(crate) queue: Option<ShortcutHint>,
     pub(crate) insert_newline: Option<ShortcutHint>,
@@ -122,6 +123,7 @@ impl FooterKeyHints {
     #[cfg(test)]
     pub(crate) fn default_bindings() -> Self {
         Self {
+            agents: None,
             toggle_shortcuts: Some(key_hint::plain(KeyCode::Char('?')).into()),
             queue: Some(key_hint::plain(KeyCode::Tab).into()),
             insert_newline: Some(key_hint::ctrl(KeyCode::Char('j')).into()),
@@ -313,6 +315,13 @@ fn left_side_line(
     match state.hint {
         SummaryHintKind::None => {}
         SummaryHintKind::Shortcuts => {
+            if let Some(key) = key_hints.agents {
+                line.push_span(key);
+                line.push_span(" for agents".dim());
+                if key_hints.toggle_shortcuts.is_some() {
+                    line.push_span(" · ".dim());
+                }
+            }
             if let Some(key) = key_hints.toggle_shortcuts {
                 line.push_span(key);
                 line.push_span(" for shortcuts".dim());
@@ -384,6 +393,19 @@ pub(crate) fn single_line_footer_layout(
         }
     };
     let state_width = |state: LeftSideState| -> u16 { state_line(state).width() as u16 };
+    if show_shortcuts_hint && key_hints.agents.is_some() {
+        let compact_line = left_side_line(
+            collaboration_mode_indicator,
+            default_state,
+            FooterKeyHints {
+                toggle_shortcuts: None,
+                ..key_hints
+            },
+        );
+        if can_show_left_with_context(area, compact_line.width() as u16, context_width) {
+            return (SummaryLeft::Custom(compact_line), true);
+        }
+    }
     // When the mode cycle hint is applicable (idle, non-queue mode), only show
     // the right-side context indicator if the "(shift+tab to cycle)" variant
     // can also fit.
@@ -788,6 +810,13 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
         }
     }
 
+    if props.mode == FooterMode::ComposerEmpty
+        && let Some(key) = props.key_hints.agents
+        && let Some(line) = line.as_mut()
+    {
+        line.extend(vec![" · ".dim(), key.into(), " for agents".dim()]);
+    }
+
     line
 }
 
@@ -841,14 +870,22 @@ pub(crate) fn footer_hint_items_width(items: &[(String, String)]) -> u16 {
     footer_hint_items_line(items).width() as u16
 }
 
-fn footer_hint_items_line(items: &[(String, String)]) -> Line<'static> {
+pub(crate) fn footer_hint_items_line(items: &[(String, String)]) -> Line<'static> {
     let mut spans = Vec::with_capacity(items.len() * 4);
     for (idx, (key, label)) in items.iter().enumerate() {
         spans.push(" ".into());
         spans.push(key.clone().bold());
-        spans.push(format!(" {label}").into());
+        if idx == 0
+            && key == "voice"
+            && let Some(label) = label.strip_prefix("● ")
+        {
+            spans.push(" ●".red());
+            spans.push(format!(" {label}").into());
+        } else {
+            spans.push(format!(" {label}").into());
+        }
         if idx + 1 != items.len() {
-            spans.push("   ".into());
+            spans.push((if items[0].0 == "voice" { "  " } else { "   " }).into());
         }
     }
     Line::from(spans)
@@ -939,8 +976,13 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
         ordered.push(change_mode);
     }
     ordered.push(show_transcript);
-
     let mut lines = build_columns(ordered);
+    if let Some(key) = state.key_hints.agents {
+        lines.push(Line::from(vec![
+            key.into(),
+            " for agents (empty prompt)".into(),
+        ]));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         "customize shortcuts with ".into(),
@@ -1278,6 +1320,43 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::Backend;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn voice_live_microphone_indicator_is_red() {
+        let line = footer_hint_items_line(&[("voice".into(), "● listen".into())]);
+        assert_eq!(line.spans[2].style.fg, Some(ratatui::style::Color::Red));
+    }
+
+    #[test]
+    fn voice_footer_rendering_preserves_text_and_styles() {
+        let items = [
+            ("voice".into(), "● listen".into()),
+            ("ctrl+m".into(), "mute".into()),
+        ];
+        let mut terminal =
+            Terminal::new(TestBackend::new(/*width*/ 40, /*height*/ 1)).expect("create terminal");
+        terminal
+            .draw(|frame| render_footer_hint_items(frame.area(), frame.buffer_mut(), &items))
+            .expect("render voice footer");
+        let backend = terminal.backend();
+        let mut previous_style = None;
+        let style_runs = (0..40)
+            .filter_map(|x| {
+                let cell = backend.buffer().cell((x, 0))?;
+                let style = cell.style();
+                if previous_style == Some(style) {
+                    None
+                } else {
+                    previous_style = Some(style);
+                    Some((x, style))
+                }
+            })
+            .collect::<Vec<_>>();
+        insta::assert_debug_snapshot!(
+            "voice_footer_rendered_styles",
+            (backend.to_string(), style_runs)
+        );
+    }
 
     fn snapshot_footer(name: &str, props: FooterProps) {
         snapshot_footer_with_mode_indicator(

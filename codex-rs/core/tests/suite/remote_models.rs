@@ -63,6 +63,43 @@ use wiremock::matchers::path;
 const REMOTE_MODEL_SLUG: &str = "codex-test";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_update_plan_preserves_custom_catalog_instructions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    const INSTRUCTIONS: &str = "## Plan tool\nNever deploy without explicit approval.\n";
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let mut catalog = bundled_models_response()?;
+    let model = catalog
+        .models
+        .iter_mut()
+        .find(|model| model.slug == "gpt-5.2")
+        .expect("bundled gpt-5.2 model");
+    let messages = model
+        .model_messages
+        .as_mut()
+        .expect("model prompt templates");
+    messages.instructions_template = Some(INSTRUCTIONS.to_string());
+    messages.instructions_variables = None;
+    let test = test_codex()
+        .with_model("gpt-5.2")
+        .with_config(move |config| {
+            config.update_plan_enabled = false;
+            config.model_catalog = Some(catalog);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("hello").await?;
+    let request = response.single_request().body_json();
+    assert_eq!(request["instructions"], INSTRUCTIONS);
+    assert!(!request["tools"].to_string().contains("update_plan"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_model_sends_builtin_instructions() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -72,7 +109,9 @@ async fn unknown_model_sends_builtin_instructions() -> Result<()> {
         sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
     )
     .await;
-    let mut builder = test_codex().with_model("future-custom-model");
+    let mut builder = test_codex()
+        .with_model("future-custom-model")
+        .with_config(|config| config.update_plan_enabled = true);
     let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("use fallback model metadata").await?;
@@ -570,7 +609,9 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        supports_experimental_context: false,
         use_responses_lite: false,
+        guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
         auto_review_model_override: None,
@@ -839,7 +880,9 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        supports_experimental_context: false,
         use_responses_lite: false,
+        guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
         auto_review_model_override: None,
@@ -919,6 +962,7 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
+            config.update_plan_enabled = true;
             config.model = Some("gpt-5.2".to_string());
         });
     let TestCodex {
@@ -1425,7 +1469,9 @@ fn test_remote_model_with_policy(
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        supports_experimental_context: false,
         use_responses_lite: false,
+        guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
         auto_review_model_override: None,

@@ -7,6 +7,7 @@ use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
+use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use codex_protocol::auth::AuthMode;
@@ -30,7 +31,7 @@ pub(super) async fn run_remote_compact_attempt(
 ) -> CodexResult<RemoteCompactAttempt> {
     let turn_context = &step_context.turn;
     let mut history = sess.clone_history().await;
-    let base_instructions = sess.get_base_instructions().await;
+    let base_instructions = sess.get_prompt_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
             &mut history,
@@ -83,7 +84,12 @@ pub(super) async fn run_remote_compact_attempt(
             turn_context.model_info(),
             turn_state,
             CompactConversationRequestSettings {
-                effort: turn_context.reasoning_effort().cloned(),
+                effort: sess
+                    .reasoning_effort_for_request(
+                        &turn_context.initial_settings,
+                        RequestEffortUsage::Compaction,
+                    )
+                    .await,
                 summary: turn_context.reasoning_summary(),
                 service_tier: if sess.services.auth_manager.auth_mode() == Some(AuthMode::ApiKey) {
                     None

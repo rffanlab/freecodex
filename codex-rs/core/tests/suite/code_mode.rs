@@ -38,6 +38,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -915,6 +916,7 @@ async fn code_mode_excludes_mcp_servers_using_their_configured_identity() -> Res
                         serde_json::from_value(serde_json::json!({
                             "command": rmcp_test_server_bin,
                             "environment_id": environment_id,
+                            "cwd": config.cwd,
                             "omit_tools_from": omit_tools_from,
                         }))
                         .expect("test MCP server config should be valid"),
@@ -1149,6 +1151,7 @@ async fn mcp_code_mode_exclusion_does_not_change_direct_mode_tool_exposure() -> 
                         serde_json::from_value(serde_json::json!({
                             "command": rmcp_test_server_bin,
                             "environment_id": environment_id,
+                            "cwd": config.cwd,
                             "omit_tools_from": omit_tools_from,
                         }))
                         .expect("test MCP server config should be valid"),
@@ -1595,11 +1598,36 @@ text(output.output);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_update_plan_nested_tool_result_is_empty_object() -> Result<()> {
+async fn code_mode_does_not_expose_update_plan_by_default() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
     let (_test, second_mock) = run_code_mode_turn(
+        &server,
+        "inspect the available tools",
+        r#"
+text(JSON.stringify({
+  callable: typeof tools.update_plan === "function",
+  listed: ALL_TOOLS.some(({ name }) => name === "update_plan"),
+}));
+"#,
+    )
+    .await?;
+
+    let (output, _) = custom_tool_output_body_and_success(&second_mock.single_request(), "call-1");
+    assert_eq!(
+        serde_json::from_str::<Value>(&output)?,
+        serde_json::json!({ "callable": false, "listed": false })
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_update_plan_nested_tool_result_is_empty_object() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let (_test, second_mock) = run_code_mode_turn_with_config(
         &server,
         "use exec to run update_plan",
         r#"
@@ -1608,6 +1636,7 @@ const result = await tools.update_plan({
 });
 text(JSON.stringify(result));
 "#,
+        |config| config.update_plan_enabled = true,
     )
     .await?;
 
@@ -1666,18 +1695,23 @@ text(JSON.stringify(result));
     Ok(())
 }
 
+#[test_case("{}"; "object")]
+#[test_case(""; "omitted")]
+#[test_case("undefined"; "undefined")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_current_time_returns_structured_result() -> Result<()> {
+async fn code_mode_current_time_returns_structured_result(argument: &str) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
     let (_test, second_mock) = run_code_mode_turn_with_config(
         &server,
         "use exec to get the current time",
-        r#"
-const result = await tools.clock__curr_time({});
+        &format!(
+            r#"
+const result = await tools.clock__curr_time({argument});
 text(JSON.stringify(result));
 "#,
+        ),
         |config| {
             config
                 .features
@@ -2343,15 +2377,52 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct ResponseIdObserver {
+    response_ids: Mutex<Vec<(String, Option<String>)>>,
+    originating_items: Mutex<Vec<(String, Option<codex_protocol::ResponseItemId>)>>,
+    wait_started: tokio::sync::Notify,
+}
+
+impl ToolLifecycleContributor for ResponseIdObserver {
+    fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            if matches!(input.tool_name.name.as_str(), "exec" | "exec_command") {
+                self.originating_items.lock().unwrap().push((
+                    input.tool_name.name.clone(),
+                    input.originating_item_id.cloned(),
+                ));
+            }
+            if matches!(input.tool_name.name.as_str(), "exec_command" | "wait") {
+                self.response_ids.lock().unwrap().push((
+                    input.tool_name.name.clone(),
+                    input
+                        .turn_store
+                        .get::<codex_api::ResponseId>()
+                        .map(|id| id.0.clone()),
+                ));
+                if input.tool_name.name == "wait" {
+                    self.wait_started.notify_one();
+                }
+            }
+        })
+    }
+}
+
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_can_yield_and_resume_with_wait() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let mut builder = test_codex().with_config(move |config| {
-        let _ = config.features.enable(Feature::CodeMode);
-    });
+    let observer = Arc::new(ResponseIdObserver::default());
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_lifecycle_contributor(observer.clone());
+    let mut builder = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(move |config| {
+            let _ = config.features.enable(Feature::CodeMode);
+        });
     let test = builder.build(&server).await?;
     let phase_2_gate = test.workspace_path("code-mode-phase-2.ready");
     let phase_3_gate = test.workspace_path("code-mode-phase-3.ready");
@@ -2363,16 +2434,16 @@ async fn code_mode_can_yield_and_resume_with_wait() -> Result<()> {
 text("phase 1");
 yield_control();
 {phase_2_wait}
-text("phase 2");
+text((await tools.exec_command({{cmd: "printf 'phase 2'"}})).output);
 {phase_3_wait}
-text("phase 3");
+text((await tools.exec_command({{cmd: "printf 'phase 3'"}})).output);
 "#
     );
 
     responses::mount_sse_once(
         &server,
         sse(vec![
-            ev_response_created("resp-1"),
+            responses::ev_response_created("resp-1"),
             ev_custom_tool_call("call-1", "exec", &code),
             ev_completed("resp-1"),
         ]),
@@ -2405,7 +2476,7 @@ text("phase 3");
     responses::mount_sse_once(
         &server,
         sse(vec![
-            ev_response_created("resp-3"),
+            responses::ev_response_created("resp-3"),
             responses::ev_function_call(
                 "call-2",
                 "wait",
@@ -2427,8 +2498,11 @@ text("phase 3");
     )
     .await;
 
-    fs::write(&phase_2_gate, "ready")?;
-    test.submit_turn("wait again").await?;
+    tokio::try_join!(test.submit_turn("wait again"), async {
+        observer.wait_started.notified().await;
+        fs::write(&phase_2_gate, "ready")?;
+        anyhow::Ok(())
+    })?;
 
     let second_request = second_completion.single_request();
     let second_items = function_tool_output_items(&second_request, "call-2");
@@ -2449,7 +2523,7 @@ text("phase 3");
     responses::mount_sse_once(
         &server,
         sse(vec![
-            ev_response_created("resp-5"),
+            responses::ev_response_created("resp-5"),
             responses::ev_function_call(
                 "call-3",
                 "wait",
@@ -2471,8 +2545,11 @@ text("phase 3");
     )
     .await;
 
-    fs::write(&phase_3_gate, "ready")?;
-    test.submit_turn("wait for completion").await?;
+    tokio::try_join!(test.submit_turn("wait for completion"), async {
+        observer.wait_started.notified().await;
+        fs::write(&phase_3_gate, "ready")?;
+        anyhow::Ok(())
+    })?;
 
     let third_request = third_completion.single_request();
     let third_items = function_tool_output_items(&third_request, "call-3");
@@ -2486,6 +2563,43 @@ text("phase 3");
     );
     assert_eq!(text_item(&third_items, /*index*/ 1), "phase 3");
 
+    // Resuming the cell changes the response id, but its nested calls retain
+    // the original exec item's identity for request-local freshness accounting.
+    let originating_items = observer.originating_items.lock().unwrap();
+    let wrapper_item = originating_items[0]
+        .1
+        .clone()
+        .expect("wrapper item identity");
+    assert!(originating_items.len() >= 3);
+    assert!(
+        originating_items
+            .iter()
+            .all(|(_, item)| item.as_ref() == Some(&wrapper_item))
+    );
+
+    let observed = observer.response_ids.lock().unwrap();
+    let mut nested_response_ids = observed
+        .iter()
+        .filter(|(tool, _)| tool == "exec_command")
+        .filter_map(|(_, response_id)| response_id.clone())
+        .skip_while(|response_id| response_id != &"resp-3".to_owned())
+        .collect::<Vec<_>>();
+    nested_response_ids.dedup();
+    assert_eq!(
+        nested_response_ids,
+        vec!["resp-3".to_owned(), "resp-5".to_owned()]
+    );
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|(tool, _)| tool == "wait")
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            ("wait".to_owned(), Some("resp-3".to_owned())),
+            ("wait".to_owned(), Some("resp-5".to_owned())),
+        ]
+    );
     Ok(())
 }
 
@@ -3829,6 +3943,89 @@ text("after");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_omits_short_audio_and_preserves_other_output() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let [short_audio_url, valid_audio_url] = [120_u32, 600].map(|frames| {
+        let sample_rate = 24_000_u32;
+        let data_size = frames * 2;
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_size.to_le_bytes());
+        wav.resize(44 + data_size as usize, /*value*/ 0);
+        format!("data:audio/wav;base64,{}", BASE64_STANDARD.encode(wav))
+    });
+    let code = format!(
+        r#"
+text("before");
+audio({short_audio_url:?});
+text("between");
+audio({valid_audio_url:?});
+text("after");
+"#,
+    );
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex()
+        .with_model_info_override("gpt-5.4", |model| {
+            model.input_modalities.push(InputModality::Audio);
+        })
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_custom_tool_call("call-1", "exec", &code),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let second_mock = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn("use exec to return short and valid audio with text")
+        .await?;
+
+    let req = second_mock.single_request();
+    let items = custom_tool_output_items(&req, "call-1");
+    let (_, success) = custom_tool_output_body_and_success(&req, "call-1");
+    assert_ne!(success, Some(false));
+    assert_eq!(
+        &items[1..],
+        &[
+            serde_json::json!({ "type": "input_text", "text": "before" }),
+            serde_json::json!({
+                "type": "input_text",
+                "text": "Audio output omitted because the clip is shorter than 25 ms; use a longer clip."
+            }),
+            serde_json::json!({ "type": "input_text", "text": "between" }),
+            serde_json::json!({ "type": "input_audio", "audio_url": valid_audio_url }),
+            serde_json::json!({ "type": "input_text", "text": "after" }),
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_replaces_malformed_image() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -4347,6 +4544,7 @@ async fn code_mode_node_repl_screenshots_can_be_captured_without_guardian_transc
         let mcp = serde_json::from_value(serde_json::json!({
             "command": mcp_server_bin,
             "environment_id": remote_aware_environment_id(),
+            "cwd": config.cwd,
             "env": { "MCP_TEST_ENABLE_NODE_REPL_JS": "1" },
             "omit_tools_from": ["deferred"],
         }))
@@ -4440,6 +4638,7 @@ async fn code_mode_node_repl_image_flag_without_enhanced_stays_disabled(
             let mcp = serde_json::from_value(serde_json::json!({
                 "command": mcp_server_bin,
                 "environment_id": remote_aware_environment_id(),
+                "cwd": config.cwd,
                 "env": { "MCP_TEST_ENABLE_NODE_REPL_JS": "1" },
                 "omit_tools_from": ["deferred"],
             }))
@@ -4508,8 +4707,7 @@ await tools.exec_command({ cmd: "true", sandbox_permissions: "require_escalated"
 #[test_case("node_repl", true, true, false, Some("unbounded"); "text_fallback_without_context_bound")]
 #[test_case("node_repl", true, true, false, Some("small"); "text_fallback_with_insufficient_context")]
 #[test_case("node_repl", true, true, false, Some("large_prompt"); "images_resume_after_prompt_pressure")]
-#[test_case("node_repl", true, true, false, Some("buffered"); "multimodal_reviewer_preserves_model_owned_fallback_buffer")]
-#[test_case("node_repl", true, true, false, Some("rollover"); "multimodal_reviewer_rollover_replays_evidence")]
+#[test_case("node_repl", true, true, false, Some("compaction"); "multimodal_reviewer_compaction_preserves_evidence")]
 #[test_case("cua_repl", false, false, false, None; "cua_disabled")]
 #[test_case("cua_repl", true, false, false, None; "cua_manually_enabled_text_only")]
 #[test_case("cua_repl", true, true, false, None; "cua_manually_enabled_multimodal")]
@@ -4539,8 +4737,18 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
     const PRIVATE_IMAGE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     let server = responses::start_mock_server().await;
     let mcp_server_bin = remote_aware_stdio_server_bin()?;
-    let reviewer_rollover = reviewer_constraint == Some("rollover");
-    let reviewer_token_budget = matches!(reviewer_constraint, Some("buffered" | "rollover"));
+    let reviewer_compaction = reviewer_constraint == Some("compaction");
+    let compact = if reviewer_compaction {
+        Some(
+            responses::mount_compact_user_history_with_summary_once(
+                &server,
+                "Guardian browser evidence summary",
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let check_detail = enhanced_transcripts && transcript_images && reviewer_constraint.is_none();
     let mut large_image = Cursor::new(Vec::new());
     if check_detail {
@@ -4563,7 +4771,7 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
                     .iter_mut()
                     .find(|model| model.slug == "gpt-5.6-luna")
                     .expect("API-key Guardian reviewer");
-                if reviewer_token_budget {
+                if reviewer_compaction {
                     reviewer.context_window = Some(100_000);
                     reviewer.max_context_window = Some(100_000);
                     reviewer.auto_compact_token_limit = Some(50_000);
@@ -4582,7 +4790,8 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
                 .features
                 .enable(Feature::CodeMode)
                 .expect("enable Code Mode");
-            if reviewer_token_budget {
+            if reviewer_compaction {
+                config.features.disable(Feature::RemoteCompactionV2).expect("use remote compaction");
                 config
                     .features
                     .enable(Feature::TokenBudget)
@@ -4602,6 +4811,7 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
             let mcp: McpServerConfig = serde_json::from_value(serde_json::json!({
                 "command": mcp_server_bin,
                 "environment_id": remote_aware_environment_id(),
+                "cwd": config.cwd,
                 "env": {
                     "MCP_TEST_ENABLE_NODE_REPL_JS": "1",
                     "MCP_TEST_IMAGE_DATA_URL": format!("data:image/png;base64,{}", BASE64_STANDARD.encode(large_image.into_inner())),
@@ -4623,8 +4833,7 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
     let test = builder.build_with_auto_env(&server).await?;
     wait_for_mcp_server(&test.codex, repl_server).await?;
     let images_enabled = auto_review_required || (enhanced_transcripts && transcript_images);
-    let reviewer_images =
-        images_enabled && (reviewer_constraint.is_none() || reviewer_token_budget);
+    let reviewer_images = images_enabled && (reviewer_constraint.is_none() || reviewer_compaction);
     let snapshot_padding = if images_enabled && reviewer_constraint != Some("large_prompt") {
         2_500
     } else {
@@ -4653,13 +4862,13 @@ await tools.mcp__node_repl__js({ code: 'nodeRepl.empty()' });
 await tools.mcp__node_repl__js({ code: 'await nodeRepl.emitImage(await tab.screenshot())' });
 if (LARGE_IMAGE) await tools.mcp__node_repl__image_scenario({ scenario: "invalid_image_bytes_then_image" });
 await tools.exec_command({ cmd: "true", sandbox_permissions: "require_escalated", justification: "review" });
-if (!REVIEWER_ROLLOVER) await tools.mcp__node_repl__js({ code: 'await nodeRepl.emitImage(await tab.screenshot())' });
+if (!REVIEWER_COMPACTION) await tools.mcp__node_repl__js({ code: 'await nodeRepl.emitImage(await tab.screenshot())' });
 if (LARGE_IMAGE) await tools.mcp__node_repl__image({});
 await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_escalated", justification: "review again" });
 "#
     .replace("node_repl", repl_server)
     .replace("SNAPSHOT_PADDING", &snapshot_padding.to_string())
-    .replace("REVIEWER_ROLLOVER", &reviewer_rollover.to_string())
+    .replace("REVIEWER_COMPACTION", &reviewer_compaction.to_string())
     .replace("LARGE_IMAGE", &check_detail.to_string());
     let response_mock = responses::mount_sse_sequence(
         &server,
@@ -4688,10 +4897,10 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
             ]),
             sse(vec![
                 ev_assistant_message("guardian", r#"{"outcome":"allow"}"#),
-                if reviewer_token_budget {
+                if reviewer_compaction {
                     responses::ev_completed_with_tokens(
                         "resp-guardian",
-                        /*total_tokens*/ if reviewer_rollover { 70_000 } else { 60_000 },
+                        /*total_tokens*/ 70_000,
                     )
                 } else {
                     ev_completed("resp-guardian")
@@ -4796,43 +5005,21 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
             reviewer_image_urls
         }
     );
-    if reviewer_rollover {
-        let second_request = guardian_requests[1];
-        let second_prompt = second_request
-            .message_input_text_groups("user")
-            .last()
-            .expect("post-rollover Guardian review prompt")
-            .join("");
-        assert!(second_prompt.contains(">>> TRANSCRIPT START\n"));
-        assert!(!second_prompt.contains(">>> TRANSCRIPT DELTA START\n"));
-        assert!(second_prompt.contains(NODE_REPL_DOM_MIDDLE));
+    if let Some(compact) = compact {
+        let compact_request = compact.single_request();
+        assert!(
+            compact_request
+                .message_input_texts("user")
+                .concat()
+                .contains(NODE_REPL_DOM_MIDDLE)
+        );
         assert_eq!(
-            second_request.message_input_image_urls("user"),
-            vec![PRIVATE_IMAGE.to_string()],
-            "browser screenshots must be replayed into the fresh reviewer window"
+            guardian_requests[1].inputs_of_type("compaction")[0]["encrypted_content"],
+            "Guardian browser evidence summary"
         );
-        assert!(
-            second_request
-                .message_input_texts("developer")
-                .iter()
-                .any(|text| text.contains("Previous context window id:")),
-            "Guardian should roll over before rebuilding browser evidence"
-        );
-    } else if reviewer_token_budget {
-        let second_request = guardian_requests[1];
-        let second_prompt = second_request
-            .message_input_text_groups("user")
-            .last()
-            .expect("buffered Guardian review prompt")
-            .join("");
-        assert!(second_prompt.contains(">>> TRANSCRIPT DELTA START\n"));
-        assert!(
-            second_request
-                .message_input_texts("developer")
-                .iter()
-                .all(|text| !text.contains("Previous context window id:")),
-            "Guardian should preserve the reviewer model's fallback buffer before rolling over"
-        );
+        for request in &guardian_requests {
+            assert!(!request.has_content_kinds(&["token_budget.context_window"]));
+        }
     }
     let parent_request = requests.last().expect("parent turn should complete");
     let parent_input = serde_json::to_string(&parent_request.input())?;
@@ -5805,6 +5992,7 @@ async fn code_mode_excludes_configured_nested_tool_namespaces() -> Result<()> {
 
     let server = responses::start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
+        config.update_plan_enabled = true;
         let _ = config.features.enable(Feature::CodeMode);
         config.code_mode.excluded_tool_namespaces = vec!["excluded".to_string()];
     });
@@ -5907,6 +6095,7 @@ async fn code_mode_omits_configured_mcp_server_tools() -> Result<()> {
             model.supports_search_tool = false;
         })
         .with_config(move |config| {
+            config.update_plan_enabled = true;
             let _ = config.features.enable(Feature::CodeMode);
             let mut servers = config.mcp_servers.get().clone();
             servers.insert(
@@ -5914,6 +6103,7 @@ async fn code_mode_omits_configured_mcp_server_tools() -> Result<()> {
                 serde_json::from_value(serde_json::json!({
                     "command": rmcp_test_server_bin,
                     "environment_id": environment_id,
+                    "cwd": config.cwd,
                     "omit_tools_from": ["code_mode"],
                 }))
                 .expect("test MCP server config should be valid"),
@@ -6005,6 +6195,7 @@ async fn code_mode_only_keeps_mcp_tools_direct_when_nested_exposure_is_omitted()
                 serde_json::from_value(serde_json::json!({
                     "command": rmcp_test_server_bin,
                     "environment_id": environment_id,
+                    "cwd": config.cwd,
                     "omit_tools_from": ["code_mode"],
                 }))
                 .expect("test MCP server config should be valid"),
@@ -6098,6 +6289,7 @@ async fn code_mode_only_can_call_mcp_tools_hidden_from_direct_and_deferred_expos
                 serde_json::from_value(serde_json::json!({
                     "command": rmcp_test_server_bin,
                     "environment_id": environment_id,
+                    "cwd": config.cwd,
                     "omit_tools_from": ["direct", "deferred"],
                     "supports_parallel_tool_calls": true,
                 }))

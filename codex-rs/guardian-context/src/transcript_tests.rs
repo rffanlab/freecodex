@@ -96,12 +96,21 @@ fn registered_transcript_preserves_shared_roles_and_node_repl_tool_attribution()
             target: ContextTarget::Async,
             history: &history,
             transcript: &config,
+            root_conversation: &[],
+            trusted_user_answers: &[],
+            planned_action: None,
+            permissions: None,
+            previous_reviews: None,
+            trusted_tool: None,
+            trusted_skill_paths: &[],
+            images: None,
+            node_repl: None,
         })
         .expect("transcript collection should succeed");
 
     assert_eq!(
         sections,
-        vec![ContextSection {
+        vec![ContextSection::ConversationTranscript {
             items: vec![
                 entry(
                     ConversationTranscriptEntryKind::User,
@@ -127,7 +136,7 @@ fn registered_transcript_preserves_shared_roles_and_node_repl_tool_attribution()
     );
     assert_eq!(
         sections,
-        vec![ContextSection {
+        vec![ContextSection::ConversationTranscript {
             items: collect_transcript(&history, &config),
         }]
     );
@@ -166,11 +175,20 @@ fn excluded_tool_calls_still_attribute_included_results() {
             target: ContextTarget::Async,
             history: &history,
             transcript: &config,
+            root_conversation: &[],
+            trusted_user_answers: &[],
+            planned_action: None,
+            permissions: None,
+            previous_reviews: None,
+            trusted_tool: None,
+            trusted_skill_paths: &[],
+            images: None,
+            node_repl: None,
         })
         .expect("transcript collection should succeed");
 
     assert_eq!(
-        sections[0].items,
+        transcript_items(&sections[0]),
         vec![entry(
             ConversationTranscriptEntryKind::ToolOutput("tool read_file result".to_string()),
             "file contents"
@@ -255,6 +273,15 @@ fn outputs_with_call_ids_or_explicit_names_are_retained() {
                     target,
                     history: &history,
                     transcript: &config,
+                    root_conversation: &[],
+                    trusted_user_answers: &[],
+                    planned_action: None,
+                    permissions: None,
+                    previous_reviews: None,
+                    trusted_tool: None,
+                    trusted_skill_paths: &[],
+                    images: None,
+                    node_repl: None,
                 })
                 .expect("transcript collection should succeed");
             let mut expected = vec![
@@ -271,7 +298,10 @@ fn outputs_with_call_ids_or_explicit_names_are_retained() {
                 ));
             }
             expected.push(generic("local shell output"));
-            assert_eq!(sections, vec![ContextSection { items: expected }]);
+            assert_eq!(
+                sections,
+                vec![ContextSection::ConversationTranscript { items: expected }]
+            );
         }
     }
 }
@@ -295,10 +325,19 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
                 target,
                 history: &history,
                 transcript: &config,
+                root_conversation: &[],
+                trusted_user_answers: &[],
+                planned_action: None,
+                permissions: None,
+                previous_reviews: None,
+                trusted_tool: None,
+                trusted_skill_paths: &[],
+                images: None,
+                node_repl: None,
             })
             .expect("transcript collection should succeed");
         assert_eq!(
-            sections[0].items,
+            transcript_items(&sections[0]),
             vec![ConversationTranscriptEntry {
                 kind: ConversationTranscriptEntryKind::User,
                 text: truncate_text(&text, message_tokens),
@@ -325,6 +364,15 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
                 target: ContextTarget::Async,
                 history: &history,
                 transcript: &config,
+                root_conversation: &[],
+                trusted_user_answers: &[],
+                planned_action: None,
+                permissions: None,
+                previous_reviews: None,
+                trusted_tool: None,
+                trusted_skill_paths: &[],
+                images: None,
+                node_repl: None,
             })
             .expect("transcript collection should succeed");
         let mut expected = vec![ConversationTranscriptEntry {
@@ -341,6 +389,13 @@ fn reused_registry_applies_current_history_sources_and_entry_limits() {
                 original_bytes: text.len(),
             });
         }
-        assert_eq!(sections[0].items, expected);
+        assert_eq!(transcript_items(&sections[0]), expected);
     }
+}
+
+fn transcript_items(section: &ContextSection) -> &[ConversationTranscriptEntry] {
+    let ContextSection::ConversationTranscript { items } = section else {
+        panic!("expected transcript section");
+    };
+    items
 }

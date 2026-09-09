@@ -12,6 +12,7 @@ use crate::config::ConfigOverrides;
 use crate::config::test_config;
 use crate::context::ContextualUserFragment;
 use crate::context::DeveloperInstructions;
+use crate::context::GuardianContextMode;
 use crate::context::TurnAborted;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::ThreadEnvironments;
@@ -79,6 +80,7 @@ use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::ErrorEvent;
@@ -164,6 +166,7 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_protocol::protocol::TokenUsageRecord;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -2222,11 +2225,15 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
     let rollout_items = vec![RolloutItem::Compacted(CompactedItem {
         message: String::new(),
         replacement_history: Some(replacement_history.clone()),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(42),
         first_window_id: Some(first_window_id.to_string()),
         previous_window_id: Some(previous_window_id.to_string()),
         window_id: Some(window_id.to_string()),
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     })];
 
     let reconstructed = session
@@ -2883,6 +2890,51 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
     assert_eq!(actual, Some(info2));
 }
 
+#[test]
+fn latest_token_usage_record_stops_at_compaction_checkpoint() {
+    let thread_id = ThreadId::new();
+    let checkpoint_record = TokenUsageRecord {
+        thread_id,
+        turn_id: "turn-1".to_string(),
+        session_id: SessionId::from(thread_id),
+        root_turn_id: "turn-1".to_string(),
+        response_id: "response-1".to_string(),
+        usage: TokenUsage::default(),
+        turn_token_usage: TokenUsage::default(),
+        thread_token_usage: TokenUsage::default(),
+    };
+    let checkpoint = |latest_token_usage_record| {
+        RolloutItem::Compacted(CompactedItem {
+            message: String::new(),
+            replacement_history: None,
+            retained_context: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record,
+        })
+    };
+
+    assert_eq!(
+        Session::last_token_usage_record_from_rollout(&[
+            RolloutItem::TokenUsageRecord(checkpoint_record.clone()),
+            checkpoint(Some(checkpoint_record.clone())),
+        ]),
+        Some(checkpoint_record.clone())
+    );
+    assert_eq!(
+        Session::last_token_usage_record_from_rollout(&[
+            RolloutItem::TokenUsageRecord(checkpoint_record),
+            checkpoint(None),
+        ]),
+        None
+    );
+}
+
 #[tokio::test]
 async fn recompute_token_usage_uses_session_base_instructions() {
     let (session, turn_context) = make_session_and_context().await;
@@ -3412,7 +3464,7 @@ async fn record_initial_history_reconstructs_forked_transcript() {
 }
 
 #[tokio::test]
-async fn start_new_context_window_assigns_and_persists_item_ids() {
+async fn start_new_context_window_persists_checkpoint_state() {
     let (mut session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
@@ -3421,6 +3473,18 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     .await;
     let rollout_path =
         attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    let thread_id = ThreadId::new();
+    let token_usage_record = TokenUsageRecord {
+        thread_id,
+        turn_id: "turn-1".to_string(),
+        session_id: SessionId::from(thread_id),
+        root_turn_id: "turn-1".to_string(),
+        response_id: "response-1".to_string(),
+        usage: TokenUsage::default(),
+        turn_token_usage: TokenUsage::default(),
+        thread_token_usage: TokenUsage::default(),
+    };
+    session.state.lock().await.latest_token_usage_record = Some(token_usage_record.clone());
     let step_context = session
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await
@@ -3447,21 +3511,32 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     else {
         panic!("expected resumed rollout history");
     };
-    let persisted_replacement_history = resumed.history.iter().rev().find_map(|item| match item {
-        RolloutItem::Compacted(compacted) => compacted.replacement_history.as_ref(),
+    let persisted_compacted = resumed.history.iter().rev().find_map(|item| match item {
+        RolloutItem::Compacted(compacted) => Some(compacted),
         RolloutItem::SessionMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::RetainedContext(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
     });
     assert_eq!(
-        persisted_replacement_history.cloned(),
+        persisted_compacted.and_then(|compacted| compacted.replacement_history.clone()),
         Some(live_history.annotated_items().to_vec())
+    );
+    assert_eq!(
+        persisted_compacted.map(|compacted| {
+            (
+                compacted.compaction_response_id.as_deref(),
+                compacted.latest_token_usage_record.as_ref(),
+            )
+        }),
+        Some((None, Some(&token_usage_record)))
     );
 }
 
@@ -3534,7 +3609,9 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::RetainedContext(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
     });
@@ -3594,6 +3671,7 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
     .await;
 
     let mut builder = test_codex().with_config(|config| {
+        config.update_plan_enabled = true;
         config.permissions.approval_policy =
             codex_config::Constrained::allow_any(AskForApproval::OnRequest);
     });
@@ -3630,10 +3708,8 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
         .thread_manager
         .fork_thread(
             usize::MAX,
-            fork_config.clone(),
+            core_test_support::test_codex::StartThreadOptions::new(fork_config.clone()),
             rollout_path,
-            /*thread_source*/ None,
-            /*parent_trace*/ None,
         )
         .await?;
 
@@ -3690,6 +3766,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let previous_model = "forked-rollout-model";
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
+        root_turn_id: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         workspace_roots: None,
@@ -4096,11 +4173,15 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
                     .map(ResponseItemEnvelope::new)
                     .collect(),
             ),
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(7),
             first_window_id: Some(first_window_id.to_string()),
             previous_window_id: Some(previous_window_id.to_string()),
             window_id: Some(compacted_window_id.to_string()),
+            compaction_response_id: None,
+            latest_token_usage_record: None,
         }),
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: compact_turn_id,
@@ -4403,6 +4484,7 @@ async fn set_rate_limits_retains_previous_credits() {
         windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
         use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
+        runtime_workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
@@ -4424,6 +4506,7 @@ async fn set_rate_limits_retains_previous_credits() {
     let initial = RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 10.0,
             window_minutes: Some(15),
@@ -4445,6 +4528,7 @@ async fn set_rate_limits_retains_previous_credits() {
     let update = RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
         limit_name: Some("codex_other".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 40.0,
             window_minutes: Some(30),
@@ -4468,6 +4552,7 @@ async fn set_rate_limits_retains_previous_credits() {
         Some(RateLimitSnapshot {
             limit_id: Some("codex_other".to_string()),
             limit_name: Some("codex_other".to_string()),
+            normal_model_slug: None,
             primary: update.primary.clone(),
             secondary: update.secondary,
             credits: initial.credits,
@@ -4519,6 +4604,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
         use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
+        runtime_workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
@@ -4540,6 +4626,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
     let initial = RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 15.0,
             window_minutes: Some(20),
@@ -4565,6 +4652,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
     let update = RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 35.0,
             window_minutes: Some(25),
@@ -4584,6 +4672,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         Some(RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: None,
+            normal_model_slug: None,
             primary: update.primary,
             secondary: update.secondary,
             credits: initial.credits,
@@ -4867,6 +4956,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             subagent_history_start_ordinal: None,
             history_base: None,
             initial_window_id: Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
                 model_provider: config.model_provider_id.clone(),
@@ -5160,6 +5250,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
         use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
+        runtime_workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
@@ -5551,8 +5642,12 @@ async fn session_configuration_apply_permission_profile_accepts_direct_write_roo
     );
 }
 
+#[test_case::test_case(false; "ordinary_proxy")]
+#[test_case::test_case(true; "credential_broker")]
 #[tokio::test]
-async fn active_profile_update_rebuilds_network_proxy_config() -> std::io::Result<()> {
+async fn active_profile_update_rebuilds_network_proxy_config(
+    credential_broker: bool,
+) -> std::io::Result<()> {
     let codex_home = tempfile::tempdir().expect("create codex home");
     let cwd = tempfile::tempdir().expect("create cwd");
     let permissions = PermissionsToml {
@@ -5597,7 +5692,14 @@ async fn active_profile_update_rebuilds_network_proxy_config() -> std::io::Resul
         ]),
     };
     let base_config = ConfigToml {
-        features: Some(toml::from_str("network_proxy = true").expect("valid features")),
+        features: Some(
+            toml::from_str(if credential_broker {
+                "network_proxy = { enabled = true, credential_broker = true }"
+            } else {
+                "network_proxy = true"
+            })
+            .expect("valid features"),
+        ),
         default_permissions: Some("locked-down".to_string()),
         permissions: Some(permissions),
         ..Default::default()
@@ -5659,6 +5761,7 @@ async fn active_profile_update_rebuilds_network_proxy_config() -> std::io::Resul
         .expect("selected profile proxy should become the session proxy config");
     assert_eq!(network.proxy_host_and_port(), "127.0.0.1:43128");
     assert!(!network.socks_enabled());
+    assert_eq!(network.credential_broker_enabled(), credential_broker);
     Ok(())
 }
 
@@ -5806,20 +5909,20 @@ async fn session_configuration_apply_preserves_absolute_cwd_write_root_on_cwd_up
     assert!(
         updated
             .file_system_sandbox_policy(&[])
-            .can_write_path_with_cwd(original_cwd.as_path(), updated.cwd().as_path()),
+            .can_write_local_path_with_cwd(original_cwd.as_path(), updated.cwd().as_path()),
         "absolute grant to the old cwd must remain writable"
     );
     assert!(
         !updated
             .file_system_sandbox_policy(&[])
-            .can_write_path_with_cwd(next_cwd.as_path(), updated.cwd().as_path()),
+            .can_write_local_path_with_cwd(next_cwd.as_path(), updated.cwd().as_path()),
         "cwd-only update must not reinterpret an absolute old-cwd grant as :workspace_roots"
     );
 }
 
 #[tokio::test]
-async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
-    let (mut session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
+    let (mut session, _turn_context, rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         |config| {
@@ -5863,16 +5966,22 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
                 message: "summary".to_string(),
                 window_number,
                 window_ids,
+                compaction_response_id: None,
+                compaction_model_hash: None,
             },
         ),
     ));
+    let mut settings_checkpoint = Box::pin(tokio::task::unconstrained(
+        session.checkpoint_thread_settings(),
+    ));
     assert!(futures::poll!(checkpoint.as_mut()).is_pending());
+    assert!(futures::poll!(settings_checkpoint.as_mut()).is_pending());
     assert_eq!(
         session.clone_history().await.annotated_items(),
         history_before.annotated_items()
     );
 
-    // Direct runtime restoration may overlap postcommit work. The checkpoint must wait
+    // Direct runtime restoration may overlap postcommit work. Both checkpoints must wait
     // for the accepted event, then capture current settings rather than its older commit.
     let restored = session
         .update_settings(SessionSettingsUpdate {
@@ -5889,8 +5998,18 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
     drop(refresh_guard);
     update.await.expect("accepted settings update");
     checkpoint.await;
+    settings_checkpoint
+        .await
+        .expect("checkpoint current settings");
 
-    session.flush_rollout().await.expect("flush checkpoint");
+    let live_snapshots = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event.msg {
+            EventMsg::ThreadSettingsApplied(event) => Some(event.thread_settings),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(live_snapshots, vec![committed.clone()]);
+
     let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
         .await
         .expect("read persisted settings");
@@ -5907,6 +6026,7 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
         snapshots,
         vec![
             (Some(session.thread_id), committed),
+            (Some(session.thread_id), restored.clone()),
             (Some(session.thread_id), restored),
         ]
     );
@@ -6213,6 +6333,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
         use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
+        runtime_workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
@@ -6250,6 +6371,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
+        Arc::default(),
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -6366,6 +6488,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
         use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
+        runtime_workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
@@ -6419,10 +6542,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
-    let executed_tool_calls = config
-        .features
-        .enabled(Feature::ExecutedToolCallMetadata)
-        .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
+    let executed_tool_calls = crate::state::ExecutedToolCalls::new(&config.features);
     let (hooks, async_hook_results) = Hooks::new(
         HooksConfig {
             legacy_notify_argv: config.notify.clone(),
@@ -6462,6 +6582,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         .with_legacy_custom_ca_fallback(),
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
+        git_root_discovery: Arc::default(),
         tool_approvals: Mutex::new(ApprovalStore::default()),
         persistent_permissions: Default::default(),
         guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
@@ -6529,6 +6650,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         thread_settings_persistence: Semaphore::new(/*permits*/ 1),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
+        guardian_context_mode: GuardianContextMode::from_features(&config.features),
         windows_sandbox_proxy_settings_mode:
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         multi_agent_version: OnceLock::from(config.multi_agent_version_from_features()),
@@ -6539,10 +6661,10 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_shutdown: CancellationToken::new(),
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
+        realtime_history: None,
         active_turn: Mutex::new(None),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
-        guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
@@ -6667,6 +6789,7 @@ async fn make_session_with_config_and_rx(
         windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
         use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
+        runtime_workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
@@ -6705,6 +6828,7 @@ async fn make_session_with_config_and_rx(
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
+        Arc::default(),
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -6793,6 +6917,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
         use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
+        runtime_workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
@@ -6831,6 +6956,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
+        Arc::default(),
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -7187,6 +7313,13 @@ fn strict_auto_review_session_scope_grants_no_permissions() {
         ..RequestPermissionProfile::default()
     };
 
+    let cwd = PathUri::parse("file:///tmp").expect("test cwd should be valid");
+    let context = FileSystemSandboxPolicyContext {
+        cwd: &cwd,
+        workspace_roots: &[],
+        user_home_dir: None,
+        temporary_directories: None,
+    };
     let response = Session::normalize_request_permissions_response(
         requested_permissions.clone(),
         codex_protocol::request_permissions::RequestPermissionsResponse {
@@ -7194,7 +7327,7 @@ fn strict_auto_review_session_scope_grants_no_permissions() {
             scope: PermissionGrantScope::Session,
             strict_auto_review: true,
         },
-        std::path::Path::new("/tmp"),
+        &context,
     );
 
     assert_eq!(
@@ -7283,7 +7416,7 @@ async fn request_permissions_emits_event_when_granular_policy_allows_requests() 
     );
     #[allow(deprecated)]
     let turn_cwd = turn_context.cwd.clone();
-    assert_eq!(request.cwd, Some(turn_cwd));
+    assert_eq!(request.cwd, Some(turn_cwd.into()));
 
     session
         .notify_request_permissions_response(&request.call_id, expected_response.clone())
@@ -7298,7 +7431,7 @@ async fn request_permissions_emits_event_when_granular_policy_allows_requests() 
 }
 
 #[tokio::test]
-async fn request_permissions_tool_resolves_relative_paths_against_selected_environment() {
+async fn request_permissions_tool_resolves_legacy_paths_against_selected_environment() {
     let (session, mut turn_context, rx) = make_session_and_context_with_rx().await;
     *session.active_turn.lock().await = Some(ActiveTurn::default());
     let environment_cwd = {
@@ -7306,6 +7439,7 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
         let legacy_cwd = turn_context.cwd.clone();
         legacy_cwd.join("request-permissions-environment")
     };
+    let environment_home = environment_cwd.join("home");
     std::fs::create_dir_all(environment_cwd.as_path()).expect("create environment cwd");
     let turn_context_mut = Arc::get_mut(&mut turn_context).expect("single thread settings ref");
     Arc::make_mut(&mut turn_context_mut.config)
@@ -7325,8 +7459,9 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
         .expect("primary environment")
         .clone();
     let current_environment_config = current_environment.config().clone();
-    turn_context_mut.environments.environments[0] =
-        TurnEnvironmentState::Ready(TurnEnvironment::new(
+    let environment = TurnEnvironment {
+        user_home_dir: Some(PathUri::from_abs_path(&environment_home)),
+        ..TurnEnvironment::new(
             TurnEnvironmentSelection {
                 environment_id: "remote".to_string(),
                 cwd: PathUri::from_abs_path(&environment_cwd),
@@ -7336,7 +7471,9 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
             current_environment.config_origin,
             current_environment.environment,
             current_environment.shell,
-        ));
+        )
+    };
+    turn_context_mut.environments.environments[0] = TurnEnvironmentState::Ready(environment);
 
     let call_id = "call-1".to_string();
     let handler = RequestPermissionsHandler;
@@ -7365,13 +7502,8 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
                             "reason": "need write",
                             "permissions": {
                                 "file_system": {
-                                    "entries": [{
-                                        "path": {
-                                            "type": "path",
-                                            "path": "relative.txt",
-                                        },
-                                        "access": "write",
-                                    }],
+                                    "read": null,
+                                    "write": ["relative.txt", "~/home-relative.txt"],
                                 },
                             },
                         })
@@ -7390,16 +7522,13 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
         panic!("expected request_permissions event");
     };
     let expected_permissions = RequestPermissionProfile {
-        file_system: Some(FileSystemPermissions {
-            entries: vec![FileSystemSandboxEntry {
-                path: FileSystemPath::Path {
-                    path: environment_cwd.join("relative.txt").into(),
-                },
-                access: FileSystemAccessMode::Write,
-                missing_path_behavior: None,
-            }],
-            glob_scan_max_depth: None,
-        }),
+        file_system: Some(FileSystemPermissions::from_read_write_roots(
+            /*read*/ None,
+            Some(vec![
+                environment_cwd.join("relative.txt"),
+                environment_home.join("home-relative.txt"),
+            ]),
+        )),
         ..Default::default()
     };
     assert_eq!(request.environment_id.as_deref(), Some("remote"));
@@ -7422,9 +7551,22 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
         .expect("request_permissions handler should succeed");
 }
 
+#[test_case("missing", "unknown turn environment id `missing`"; "unknown environment")]
+#[test_case("local", "permission path cannot be represented losslessly"; "lossy path")]
 #[tokio::test]
-async fn request_permissions_tool_rejects_unknown_environment_id() {
-    let (session, turn_context) = make_session_and_context().await;
+async fn request_permissions_tool_rejects_invalid_requests(
+    environment_id: &str,
+    expected_error: &str,
+) {
+    let (session, mut turn_context) = make_session_and_context().await;
+    Arc::make_mut(&mut turn_context.config)
+        .permissions
+        .approval_policy = codex_config::Constrained::allow_any(AskForApproval::Never);
+    let TurnEnvironmentState::Ready(environment) = &mut turn_context.environments.environments[0]
+    else {
+        panic!("turn environment should be ready");
+    };
+    environment.selection.cwd = PathUri::parse("file:///workspace/%FF").expect("non-UTF8 cwd");
     let turn_context = Arc::new(turn_context);
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let result = RequestPermissionsHandler
@@ -7439,10 +7581,10 @@ async fn request_permissions_tool_rejects_unknown_environment_id() {
             source: ToolCallSource::Direct,
             payload: ToolPayload::Function {
                 arguments: json!({
-                    "environment_id": "missing",
+                    "environment_id": environment_id,
                     "permissions": {
-                        "network": {
-                            "enabled": true,
+                        "file_system": {
+                            "write": ["relative"],
                         },
                     },
                 })
@@ -7452,9 +7594,9 @@ async fn request_permissions_tool_rejects_unknown_environment_id() {
         .await;
 
     let Err(FunctionCallError::RespondToModel(output)) = result else {
-        panic!("expected unknown environment id to be rejected");
+        panic!("expected invalid request to be rejected");
     };
-    assert_eq!(output, "unknown turn environment id `missing`");
+    assert_eq!(output, expected_error);
 }
 
 #[tokio::test]
@@ -7529,7 +7671,8 @@ async fn request_permissions_response_materializes_session_cwd_grants_before_rec
         request.environment_id.as_deref(),
         Some(codex_exec_server::LOCAL_ENVIRONMENT_ID)
     );
-    let request_cwd = request.cwd.clone().expect("request cwd");
+    let request_cwd =
+        PathUri::try_from(request.cwd.clone().expect("request cwd")).expect("request cwd URI");
 
     session
         .notify_request_permissions_response(
@@ -7543,7 +7686,7 @@ async fn request_permissions_response_materializes_session_cwd_grants_before_rec
         .await;
 
     let expected_permissions = RequestPermissionProfile {
-        file_system: Some(FileSystemPermissions::from_read_write_roots(
+        file_system: Some(FileSystemPermissions::from_read_write_path_uris(
             /*read*/ None,
             Some(vec![request_cwd]),
         )),
@@ -8070,6 +8213,7 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
         sess.spawn_task(
             Arc::clone(&tc),
             vec![TurnInput::UserInput {
+                acceptance_order: None,
                 content: vec![UserInput::Text {
                     text: "hello".to_string(),
                     text_elements: Vec::new(),
@@ -8136,6 +8280,7 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             subagent_history_start_ordinal: None,
             history_base: None,
             initial_window_id: Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
                 model_provider: config.model_provider_id.clone(),
@@ -8247,6 +8392,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() {
             subagent_history_start_ordinal: None,
             history_base: None,
             initial_window_id: Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
                 model_provider: config.model_provider_id.clone(),
@@ -8487,7 +8633,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
     };
     parent_session
-        .guardian_review_session
+        .guardian_review_session()
         .cache_for_test(child_session, child_io)
         .await;
 
@@ -8519,13 +8665,13 @@ async fn cached_guardian_subagent_exposes_its_rollout_path() {
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
     };
     parent_session
-        .guardian_review_session
+        .guardian_review_session()
         .cache_for_test(child_session, child_io)
         .await;
 
     assert_eq!(
         parent_session
-            .guardian_review_session
+            .guardian_review_session()
             .trunk_rollout_path()
             .await,
         Some(child_rollout_path)
@@ -8572,7 +8718,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
     };
     parent_session
-        .guardian_review_session
+        .guardian_review_session()
         .register_ephemeral_for_test(child_session, child_io)
         .await;
 
@@ -8675,6 +8821,7 @@ where
         windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
         use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
+        runtime_workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
@@ -8698,7 +8845,11 @@ where
         session_configuration.session_source.clone(),
     );
 
-    let state = SessionState::new(session_configuration.clone());
+    let mut state = SessionState::new(session_configuration.clone());
+    state.history = ContextManager::with_guardian_context_mode(
+        GuardianContextMode::from_features(&config.features),
+        &session_configuration.session_source,
+    );
     let (environment_manager, resolved_turn_environments) =
         resolved_environments_for_configuration(&session_configuration, &default_environments)
             .await;
@@ -8727,10 +8878,7 @@ where
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
-    let executed_tool_calls = config
-        .features
-        .enabled(Feature::ExecutedToolCallMetadata)
-        .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
+    let executed_tool_calls = crate::state::ExecutedToolCalls::new(&config.features);
     let (hooks, async_hook_results) = Hooks::new(
         HooksConfig {
             legacy_notify_argv: config.notify.clone(),
@@ -8770,6 +8918,7 @@ where
         .with_legacy_custom_ca_fallback(),
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
+        git_root_discovery: Arc::default(),
         tool_approvals: Mutex::new(ApprovalStore::default()),
         persistent_permissions: Default::default(),
         guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
@@ -8837,6 +8986,7 @@ where
         thread_settings_persistence: Semaphore::new(/*permits*/ 1),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
+        guardian_context_mode: GuardianContextMode::from_features(&config.features),
         windows_sandbox_proxy_settings_mode:
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         multi_agent_version: OnceLock::from(config.multi_agent_version_from_features()),
@@ -8847,10 +8997,10 @@ where
         mcp_prewarm_shutdown: CancellationToken::new(),
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
+        realtime_history: None,
         active_turn: Mutex::new(None),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
-        guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
@@ -8988,6 +9138,7 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
             &turn_context,
             /*selected_capability_roots*/ &[],
             /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
 
@@ -9091,8 +9242,12 @@ async fn refreshed_mcp_binding_captures_current_approval_authority() {
     );
 }
 
+#[test_case(false; "legacy thread reviewer")]
+#[test_case(true; "explicit live reviewer")]
 #[tokio::test]
-async fn mcp_elicitation_reviewer_uses_latest_runtime_authority() {
+async fn mcp_elicitation_reviewer_uses_active_reviewer_and_latest_runtime_policy(
+    live_update: bool,
+) {
     let guardian_server = start_mock_server().await;
     mount_sse_once(
         &guardian_server,
@@ -9132,17 +9287,34 @@ async fn mcp_elicitation_reviewer_uses_latest_runtime_authority() {
         )
         .await;
 
-    session
-        .update_settings(SessionSettingsUpdate {
-            step_settings: StepSettingsUpdate {
-                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .await
-        .expect("reviewer settings should update");
+    session.mark_mcp_runtime_dirty();
     session.refresh_mcp_if_dirty().await;
+    if live_update {
+        assert_eq!(
+            session
+                .apply_turn_settings(
+                    &old_turn.sub_id,
+                    codex_protocol::protocol::TurnSettingsUpdate {
+                        approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                        ..Default::default()
+                    },
+                )
+                .await,
+            codex_protocol::protocol::TurnSettingsUpdateOutcome::Applied
+        );
+    } else {
+        session
+            .update_settings(SessionSettingsUpdate {
+                step_settings: StepSettingsUpdate {
+                    approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .expect("reviewer settings should update");
+        session.refresh_mcp_if_dirty().await;
+    }
 
     let request = codex_mcp::ElicitationReviewRequest {
         server_name: "browser-use".to_string(),
@@ -9591,6 +9763,7 @@ async fn spawn_task_does_not_update_previous_turn_settings_for_non_run_turn_task
     sess.set_previous_turn_settings(/*previous_turn_settings*/ None)
         .await;
     let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
         content: vec![UserInput::Text {
             text: "hello".to_string(),
             text_elements: Vec::new(),
@@ -10885,6 +11058,7 @@ async fn attach_in_memory_thread_store(
             subagent_history_start_ordinal: None,
             history_base: None,
             initial_window_id: Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
                 model_provider: config.model_provider_id.clone(),
@@ -11361,6 +11535,7 @@ async fn guardian_auto_review_emits_thread_idle_after_interrupt() {
 async fn guardian_helper_review_interrupts_after_three_consecutive_denials() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
         content: vec![UserInput::Text {
             text: "keep turn active for helper reviews".to_string(),
             text_elements: Vec::new(),
@@ -11428,6 +11603,7 @@ async fn turn_complete_flushes_terminal_event_after_delivery() {
     .await;
 
     let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
         content: vec![UserInput::Text {
             text: "complete normally".to_string(),
             text_elements: Vec::new(),
@@ -11455,6 +11631,7 @@ async fn turn_aborted_flushes_terminal_event_after_delivery() {
     .await;
 
     let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
         content: vec![UserInput::Text {
             text: "interrupt me".to_string(),
             text_elements: Vec::new(),
@@ -11497,6 +11674,7 @@ async fn turn_aborted_flushes_terminal_event_after_delivery() {
 async fn abort_regular_task_emits_marker_before_turn_aborted() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
         content: vec![UserInput::Text {
             text: "hello".to_string(),
             text_elements: Vec::new(),
@@ -11538,6 +11716,7 @@ async fn abort_regular_task_emits_marker_before_turn_aborted() {
 async fn abort_gracefully_emits_marker_before_turn_aborted() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
         content: vec![UserInput::Text {
             text: "hello".to_string(),
             text_elements: Vec::new(),
@@ -11599,6 +11778,7 @@ async fn submit_steer_only(
 async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
         content: vec![UserInput::Text {
             text: "hello".to_string(),
             text_elements: Vec::new(),
@@ -11935,6 +12115,76 @@ async fn trigger_turn_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
     assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
 }
 
+#[test_case(None; "independent root")]
+#[test_case(Some("root-a"); "inherited root")]
+#[tokio::test]
+async fn active_turn_keeps_first_root_when_mail_coalesces(inherited_root: Option<&str>) {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    if let Some(root) = inherited_root {
+        tc.turn_metadata_state.set_root_turn_id(root.to_string());
+    }
+    let first = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker_a").expect("worker path should parse"),
+        AgentPath::root(),
+        Vec::new(),
+        "first".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let second = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker_b").expect("worker path should parse"),
+        AgentPath::root(),
+        Vec::new(),
+        "second".to_string(),
+        /*trigger_turn*/ true,
+    );
+    for (index, (communication, parent_turn_id, root_turn_id)) in [
+        (first.clone(), "parent-a", "root-a"),
+        (second.clone(), "parent-b", "root-b"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sess.input_queue
+            .enqueue_mailbox_communication(
+                communication,
+                codex_protocol::turn_input::TurnStartOptions {
+                    parent_turn_id: Some(parent_turn_id.to_string()),
+                    root_turn_id: Some(root_turn_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        if index == 0 {
+            // The first message is already queued when this independent task
+            // starts; the second arrives after its root is established.
+            sess.spawn_task(
+                Arc::clone(&tc),
+                Vec::new(),
+                NeverEndingTask {
+                    kind: TaskKind::Regular,
+                    listen_to_cancellation_token: true,
+                },
+            )
+            .await;
+        }
+    }
+
+    assert_eq!(
+        (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
+        vec![
+            TurnInput::InterAgentCommunication(first),
+            TurnInput::InterAgentCommunication(second),
+        ]
+    );
+    assert_eq!(
+        tc.turn_metadata_state.root_turn_id().as_deref(),
+        Some(inherited_root.unwrap_or(&tc.sub_id))
+    );
+    assert!(!sess.input_queue.has_pending_mailbox_items().await);
+
+    sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+}
+
 #[tokio::test]
 async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
@@ -11976,6 +12226,7 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
         (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![
             TurnInput::UserInput {
+                acceptance_order: None,
                 content: vec![UserInput::Text {
                     text: "follow up".to_string(),
                     text_elements: Vec::new(),
@@ -12032,6 +12283,7 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
         (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![
             TurnInput::UserInput {
+                acceptance_order: None,
                 content: vec![UserInput::Text {
                     text: "follow up".to_string(),
                     text_elements: Vec::new(),
@@ -12103,6 +12355,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
 async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
         content: vec![UserInput::Text {
             text: "start review".to_string(),
             text_elements: Vec::new(),
@@ -12294,11 +12547,15 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::Compacted(CompactedItem {
         message: summary1.to_string(),
         replacement_history: None,
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(window_number),
         first_window_id: Some(window_ids.first_window_id.to_string()),
         previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
         window_id: Some(window_ids.window_id.to_string()),
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     }));
 
     let user2 = user_message("second user");
@@ -12324,11 +12581,15 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::Compacted(CompactedItem {
         message: summary2.to_string(),
         replacement_history: None,
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(window_number),
         first_window_id: Some(window_ids.first_window_id.to_string()),
         previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
         window_id: Some(window_ids.window_id.to_string()),
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     }));
 
     let user3 = user_message("third user");

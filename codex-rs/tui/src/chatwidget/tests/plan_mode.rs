@@ -549,7 +549,7 @@ fn plan_mode_prompt_notification_uses_dedicated_type_name() {
 #[tokio::test]
 async fn open_plan_implementation_prompt_sets_pending_notification() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    chat.config.tui_notifications.notifications =
+    chat.local_settings.tui.notification_settings.notifications =
         Notifications::Custom(vec!["plan-mode-prompt".to_string()]);
 
     chat.open_plan_implementation_prompt();
@@ -563,7 +563,7 @@ async fn open_plan_implementation_prompt_sets_pending_notification() {
 #[tokio::test]
 async fn open_plan_reasoning_scope_prompt_sets_pending_notification() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    chat.config.tui_notifications.notifications =
+    chat.local_settings.tui.notification_settings.notifications =
         Notifications::Custom(vec!["plan-mode-prompt".to_string()]);
 
     chat.open_plan_reasoning_scope_prompt("gpt-5.4".to_string(), Some(ReasoningEffortConfig::High));
@@ -624,7 +624,7 @@ async fn request_user_input_notification_overrides_pending_agent_turn_complete_n
 #[tokio::test]
 async fn handle_request_user_input_sets_pending_notification() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    chat.config.tui_notifications.notifications =
+    chat.local_settings.tui.notification_settings.notifications =
         Notifications::Custom(vec!["plan-mode-prompt".to_string()]);
 
     chat.handle_request_user_input_now(ToolRequestUserInputParams {
@@ -832,6 +832,7 @@ async fn plan_implementation_popup_skips_replayed_turn_complete() {
                 phase: Some(MessagePhase::FinalAnswer),
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             }],
             status: AppServerTurnStatus::Completed,
             error: None,
@@ -871,6 +872,7 @@ async fn plan_implementation_popup_shows_once_when_replay_precedes_live_turn_com
                 phase: Some(MessagePhase::FinalAnswer),
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             }],
             status: AppServerTurnStatus::Completed,
             error: None,
@@ -933,7 +935,7 @@ async fn plan_implementation_popup_skips_when_messages_queued() {
 
     chat.on_task_complete(
         Some("Plan details".to_string()),
-        /*duration_ms*/ None,
+        /*completion*/ None,
         /*from_replay*/ false,
     );
 
@@ -961,7 +963,7 @@ async fn plan_implementation_popup_skips_without_proposed_plan() {
         }],
     });
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -983,7 +985,7 @@ async fn plan_implementation_popup_shows_after_proposed_plan_output() {
     chat.on_plan_delta("- Step 1\n- Step 2\n".to_string());
     chat.on_plan_item_completed("- Step 1\n- Step 2\n".to_string());
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -1026,7 +1028,7 @@ async fn plan_implementation_popup_skips_when_steer_follows_proposed_plan() {
 
     complete_user_message(&mut chat, "user-1", "Please continue.");
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -1073,7 +1075,7 @@ async fn plan_implementation_popup_shows_after_new_plan_follows_steer() {
         .to_string(),
     );
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -1102,7 +1104,7 @@ async fn plan_implementation_popup_skips_when_rate_limit_prompt_pending() {
     });
     chat.on_rate_limit_snapshot(Some(snapshot(/*percent*/ 92.0)));
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -1481,7 +1483,7 @@ async fn plan_slash_command_with_hidden_shell_paste_rejected_image_remains_liter
         .expect("current model")
         .input_modalities
         .retain(|modality| *modality != InputModality::Image);
-    chat.model_catalog = Arc::new(ModelCatalog::new(models));
+    Arc::make_mut(&mut chat.model_catalog).models = models;
     let payload = paste_hidden_plan_shell_payload(&mut chat);
     chat.set_remote_image_urls(vec!["https://example.com/image.png".to_string()]);
 
@@ -1556,7 +1558,7 @@ async fn rejected_initial_image_does_not_submit_later_queued_prompt() {
         .expect("current model")
         .input_modalities
         .retain(|modality| *modality != InputModality::Image);
-    chat.model_catalog = Arc::new(ModelCatalog::new(models));
+    Arc::make_mut(&mut chat.model_catalog).models = models;
     let mut initial_message = UserMessage::from("initial prompt");
     initial_message.remote_image_urls = vec!["https://example.com/image.png".to_string()];
     chat.initial_user_message = Some(initial_message);
@@ -1596,7 +1598,7 @@ async fn vim_mode_default_disabled_starts_composer_in_insert_mode() {
 }
 
 #[tokio::test]
-async fn vim_mode_default_enabled_starts_composer_in_normal_mode() {
+async fn vim_mode_default_enabled_starts_composer_in_insert_mode() {
     let chat = make_startup_chat_with_cli_overrides(vec![(
         "tui.vim_mode_default".to_string(),
         TomlValue::Boolean(true),
@@ -1606,8 +1608,13 @@ async fn vim_mode_default_enabled_starts_composer_in_normal_mode() {
     assert!(chat.bottom_pane.composer_is_vim_enabled());
     assert!(chat.composer_is_empty());
     let mut chat = chat;
-    chat.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-    assert_eq!(chat.bottom_pane.composer_text(), "");
+    let empty_startup_draft = chat.bottom_pane.composer_draft_snapshot();
+    chat.restore_startup_draft(empty_startup_draft);
+    chat.handle_key_event(KeyCode::Char('x').into());
+    chat.handle_key_event(KeyCode::Right.into());
+    chat.handle_key_event(KeyCode::Esc.into());
+    chat.handle_key_event(KeyCode::Char('.').into());
+    assert_eq!(chat.bottom_pane.composer_text(), "xx");
 }
 
 async fn make_startup_chat_with_cli_overrides(
@@ -1623,6 +1630,8 @@ async fn make_startup_chat_with_cli_overrides(
     let resolved_model = get_model_offline_for_tests(cfg.model.as_deref());
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
+        requires_openai_auth: true,
+        local_settings: crate::local_settings::LocalSettings::from(&cfg),
         config: cfg.clone(),
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(unbounded_channel::<AppEvent>().0),
@@ -1635,7 +1644,6 @@ async fn make_startup_chat_with_cli_overrides(
         feedback: codex_feedback::CodexFeedback::new(),
         is_first_run: true,
         status_account_display: None,
-        runtime_model_provider_base_url: None,
         initial_plan_type: None,
         model: Some(resolved_model),
         startup_tooltip_override: None,

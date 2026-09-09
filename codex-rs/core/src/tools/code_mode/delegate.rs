@@ -20,7 +20,7 @@ use super::ExecContext;
 use super::PUBLIC_TOOL_NAME;
 use super::submit_nested_tool;
 use crate::session::step_context::StepContext;
-use crate::tools::ExecutedToolCallRecorder;
+use crate::tools::ExecutedToolCalls;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::parallel::ToolCallRuntime;
 
@@ -28,7 +28,7 @@ pub(super) struct CodeModeDispatchBroker {
     dispatch_tx: async_channel::Sender<DispatchMessage>,
     dispatch_rx: async_channel::Receiver<DispatchMessage>,
     dispatch_gates: Arc<Mutex<HashMap<CellId, CellDispatchGate>>>,
-    executed_tool_calls: Option<Arc<ExecutedToolCallRecorder>>,
+    executed_tool_calls: ExecutedToolCalls,
 }
 
 struct CellDispatchGate {
@@ -38,7 +38,7 @@ struct CellDispatchGate {
 }
 
 impl CodeModeDispatchBroker {
-    pub(super) fn new(executed_tool_calls: Option<Arc<ExecutedToolCallRecorder>>) -> Self {
+    pub(super) fn new(executed_tool_calls: ExecutedToolCalls) -> Self {
         let (dispatch_tx, dispatch_rx) = async_channel::unbounded();
         Self {
             dispatch_tx,
@@ -84,9 +84,7 @@ impl CodeModeDispatchBroker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         dispatch_gates.remove(cell_id);
-        if let Some(recorder) = &self.executed_tool_calls {
-            recorder.finish_cell_recording(cell_id);
-        }
+        self.executed_tool_calls.finish_cell_recording(cell_id);
     }
 
     pub(super) fn active_cell_ids(&self) -> Vec<CellId> {
@@ -104,11 +102,7 @@ impl CodeModeDispatchBroker {
         step_context: Arc<StepContext>,
         tracker: SharedTurnDiffTracker,
     ) -> CodeModeDispatchWorker {
-        let track_completeness = exec
-            .turn
-            .config
-            .features
-            .enabled(codex_features::Feature::ExecutedToolCallMetadata);
+        let track_completeness = ExecutedToolCalls::is_enabled(&exec.turn.config.features);
         let tool_runtime = ToolCallRuntime::new(Arc::clone(&exec.session), step_context, tracker);
         let host = Arc::new(CoreTurnHost { exec, tool_runtime });
         let dispatch_rx = self.dispatch_rx.clone();
@@ -255,6 +249,17 @@ async fn wait_until_cell_ready_for_dispatch(
 }
 
 impl CodeModeSessionDelegate for CodeModeDispatchBroker {
+    #[tracing::instrument(
+        name = "code_mode.broker.invoke_tool",
+        level = "info",
+        skip_all,
+        fields(
+            cell.id = %invocation.cell_id,
+            runtime_tool_call_id = invocation.runtime_tool_call_id.as_str(),
+            tool_name = invocation.tool_name.name.as_str(),
+            tool_namespace = invocation.tool_name.namespace.as_deref(),
+        )
+    )]
     fn invoke_tool<'a>(
         &'a self,
         invocation: CodeModeNestedToolCall,
@@ -389,3 +394,7 @@ impl CoreTurnHost {
             })
     }
 }
+
+#[cfg(test)]
+#[path = "delegate_tests.rs"]
+mod tests;

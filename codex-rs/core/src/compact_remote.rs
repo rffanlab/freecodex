@@ -273,8 +273,8 @@ async fn run_remote_compact_task_inner_impl(
 
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
-        InitialContextInjection::BeforeLastUserMessage { .. } => {
-            Some(compaction_turn_context.to_turn_context_item())
+        InitialContextInjection::BeforeLastUserMessage { step_context, .. } => {
+            Some(step_context.to_turn_context_item())
         }
     };
     // Install is the semantic boundary where the compact endpoint's output becomes live
@@ -300,6 +300,8 @@ async fn run_remote_compact_task_inner_impl(
             message: String::new(),
             window_number: new_window_number,
             window_ids: new_window_ids,
+            compaction_response_id: None,
+            compaction_model_hash: compaction_turn_context.model_info().comp_hash.clone(),
         },
     )
     .await;
@@ -382,7 +384,7 @@ pub(crate) fn should_keep_compacted_history_item(item: &ResponseItem) -> bool {
         ResponseItem::Message { .. } => false,
         ResponseItem::AgentMessage { .. } => true,
         ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. } => true,
-        ResponseItem::CompactionTrigger { .. } => false,
+        ResponseItem::ConfigurationUpdate { .. } | ResponseItem::CompactionTrigger { .. } => false,
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::LocalShellCall { .. }

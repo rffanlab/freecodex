@@ -335,16 +335,10 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         .collect::<Vec<_>>();
     sess.apply_rollout_reconstruction(turn_context.as_ref(), replay_items.as_slice())
         .await;
-    if sess
-        .services
+    sess.services
         .thread_extension_data
-        .remove::<NodeReplReviewEvidence>()
-        .is_some()
-    {
-        sess.guardian_review_session
-            .invalidate_for_node_repl_evidence()
-            .await;
-    }
+        .remove::<NodeReplReviewEvidence>();
+    sess.guardian_review_session().invalidate().await;
     sess.services
         .agent_control
         .rollout_budget()
@@ -411,6 +405,11 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
     }
     let _ = sess.conversation.shutdown().await;
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    let shell_snapshot_prewarm = sess.state.lock().await.shell_snapshot_prewarm.take();
+    if let Some(shell_snapshot_prewarm) = shell_snapshot_prewarm {
+        shell_snapshot_prewarm.abort();
+        let _ = shell_snapshot_prewarm.await;
+    }
     sess.hooks().shutdown().await;
     sess.async_hook_results.close();
     while sess.async_hook_results.try_recv().is_ok() {}
@@ -427,7 +426,7 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
         sess.mcp_refresh.close();
         sess.services.mcp_runtime.shutdown().await;
     }
-    sess.guardian_review_session.shutdown().await;
+    sess.guardian_review_session().shutdown().await;
 
     crate::hook_runtime::run_session_end_hooks(sess).await;
 }
@@ -535,7 +534,11 @@ pub(super) async fn submission_loop(
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
     while let Ok(sub) = rx_sub.recv().await {
-        debug!(?sub, "Submission");
+        if matches!(sub.op, Op::ResolveElicitation { .. }) {
+            debug!(submission_id = %sub.id, operation = sub.op.kind(), "Submission");
+        } else {
+            debug!(?sub, "Submission");
+        }
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
             match sub.op {
