@@ -470,7 +470,11 @@ async fn resolve_plugin_elicitation(
         ElicitationRequestRouter::default(),
     );
     let (tx_event, events) = async_channel::bounded(1);
-    let sender = manager.make_sender(server_name.to_string(), Some(tx_event));
+    let sender = manager.make_sender(
+        server_name.to_string(),
+        Some(tx_event),
+        &ClientMcpExtensions::default(),
+    );
     let elicitation = local_actor_elicitation(advertised_persistence);
     let pending = tokio::spawn(async move {
         sender(RequestId::Number(7), elicitation)
@@ -561,7 +565,11 @@ async fn persist_local_actor_approval(config: Arc<McpConfig>, elicitation: Elici
         ElicitationRequestRouter::default(),
     );
     let (tx_event, events) = async_channel::bounded(1);
-    let sender = manager.make_sender("local-actor".to_string(), Some(tx_event));
+    let sender = manager.make_sender(
+        "local-actor".to_string(),
+        Some(tx_event),
+        &ClientMcpExtensions::default(),
+    );
     let pending = tokio::spawn(async move {
         sender(RequestId::Number(1), elicitation)
             .await
@@ -737,7 +745,11 @@ async fn persistent_local_actor_approval_bypasses_reviewer() {
     );
     let (second_tx_event, second_events) = async_channel::bounded(1);
     let second_sender =
-        second_manager.make_sender("local-actor".to_string(), Some(second_tx_event));
+        second_manager.make_sender(
+            "local-actor".to_string(),
+            Some(second_tx_event),
+            &ClientMcpExtensions::default(),
+        );
     let second_response = second_sender(
         RequestId::Number(2),
         local_actor_elicitation(json!(PERSIST_ALWAYS)),
@@ -772,7 +784,11 @@ async fn strict_auto_review_does_not_use_persistent_local_actor_approval() {
         ElicitationRequestRouter::default(),
     );
     let (tx_event, events) = async_channel::bounded(1);
-    let sender = manager.make_sender("local-actor".to_string(), Some(tx_event));
+    let sender = manager.make_sender(
+        "local-actor".to_string(),
+        Some(tx_event),
+        &ClientMcpExtensions::default(),
+    );
     let response = sender(
         RequestId::Number(2),
         local_actor_elicitation_with_params(
@@ -826,7 +842,11 @@ async fn policy_denials_take_precedence_over_persistent_local_actor_approval() {
             ElicitationRequestRouter::default(),
         );
         let (tx_event, events) = async_channel::bounded(1);
-        let sender = manager.make_sender("local-actor".to_string(), Some(tx_event));
+        let sender = manager.make_sender(
+        "local-actor".to_string(),
+        Some(tx_event),
+        &ClientMcpExtensions::default(),
+    );
         let response = sender(
             RequestId::Number(2),
             local_actor_elicitation(json!(PERSIST_ALWAYS)),
@@ -860,7 +880,11 @@ async fn different_tool_params_do_not_reuse_persistent_local_actor_approval() {
         ElicitationRequestRouter::default(),
     );
     let (tx_event, events) = async_channel::bounded(1);
-    let sender = manager.make_sender("local-actor".to_string(), Some(tx_event));
+    let sender = manager.make_sender(
+        "local-actor".to_string(),
+        Some(tx_event),
+        &ClientMcpExtensions::default(),
+    );
     let pending = tokio::spawn(async move {
         sender(
             RequestId::Number(2),

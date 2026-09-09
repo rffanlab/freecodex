@@ -36,6 +36,8 @@ mod view_image;
 pub(crate) mod view_image_spec;
 mod wait_for_environment;
 
+use std::path::Path;
+
 use codex_file_system::FileSystemSandboxContext;
 use codex_sandboxing::policy_transforms::materialize_additional_permissions_with_context;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;

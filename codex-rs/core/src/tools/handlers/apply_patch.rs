@@ -320,7 +320,7 @@ async fn effective_patch_permissions(
     let effective_additional_permissions = apply_granted_turn_permissions(
         session,
         environment,
-        native_cwd.as_path(),
+        context.cwd,
         crate::sandboxing::SandboxPermissions::UseDefault,
         write_permissions_for_paths(
             &file_paths,

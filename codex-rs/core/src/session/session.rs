@@ -1529,10 +1529,7 @@ impl Session {
                 }).await;
             }
 
-            let executed_tool_calls = config
-                .features
-                .enabled(Feature::ExecutedToolCallMetadata)
-                .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
+            let executed_tool_calls = crate::state::ExecutedToolCalls::new(&config.features);
             let model_provider_fallback =
                 resolve_freecodex_model_provider_fallback(config.as_ref())?;
             let services = SessionServices {
@@ -1560,6 +1557,7 @@ impl Session {
                 .with_legacy_custom_ca_fallback(),
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
+                git_root_discovery,
                 tool_approvals: Mutex::new(ApprovalStore::persistent(config.codex_home.as_path())),
                 persistent_permissions:
                     crate::tools::persistent_permissions::PersistentPermissionStore::persistent(
