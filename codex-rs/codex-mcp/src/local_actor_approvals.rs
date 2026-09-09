@@ -189,7 +189,8 @@ fn is_confirmation(elicitation: &Elicitation) -> bool {
         }) => requested_schema.properties.is_empty(),
         Elicitation::Mcp(_)
         | Elicitation::OpenAiForm { .. }
-        | Elicitation::OpenAiElicitationForm { .. } => false,
+        | Elicitation::OpenAiElicitationForm { .. }
+        | Elicitation::UserVerification { .. } => false,
     }
 }
 
