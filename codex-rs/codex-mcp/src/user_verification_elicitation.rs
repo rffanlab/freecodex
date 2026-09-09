@@ -41,7 +41,13 @@ pub(super) async fn route(
         .requests
         .lock()
         .map_err(|_| anyhow!("elicitation request router unavailable"))?
-        .insert(key.clone(), response);
+        .insert(
+            key.clone(),
+            ElicitationResponder {
+                responder: response,
+                local_actor_approval: None,
+            },
+        );
     let _pending = PendingElicitationRequest { router, key };
     let _active = authority
         .as_ref()
