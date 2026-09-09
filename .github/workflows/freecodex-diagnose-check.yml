@@ -85,3 +85,5 @@ jobs:
           print('===== END FREECODEX CURRENT ERRORS =====')
           PY
           exit "$status"
+
+# rerun after extension PathUri fix
