@@ -352,7 +352,14 @@ impl HistoryCell for UserHistoryCell {
         if let Some(wrapped_message) = wrapped_message {
             lines.extend(prefix_message_hyperlink_lines(
                 wrapped_message,
-                message_initial_indent(if self.spoken { "› ".red().bold() } else { "› ".bold().dim() }, self.timestamp.as_ref()),
+                message_initial_indent(
+                    if self.spoken {
+                        "› ".red().bold()
+                    } else {
+                        "› ".bold().dim()
+                    },
+                    self.timestamp.as_ref(),
+                ),
                 message_subsequent_indent(self.timestamp.as_ref()),
             ));
         }
