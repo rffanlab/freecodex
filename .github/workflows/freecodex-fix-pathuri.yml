@@ -1,4 +1,4 @@
-name: FreeCodex Fix PathUri Compatibility
+name: FreeCodex Fix TUI Merge
 
 on:
   push:
@@ -20,27 +20,160 @@ jobs:
           ref: freecodex
           fetch-depth: 0
 
-      - name: Patch remaining PathUri call site
+      - name: Merge upstream speech cells with FreeCodex timestamps
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('codex-rs/core/src/tools/handlers/extension_tools.rs')
+          path = Path('codex-rs/tui/src/history_cell/messages.rs')
           text = path.read_text()
-          old = '            native_cwd.as_path(),\n'
-          new = '            environment.cwd(),\n'
-          if text.count(old) != 1:
-              raise SystemExit(f'expected exactly one extension PathUri call site, found {text.count(old)}')
-          path.write_text(text.replace(old, new, 1))
+
+          def replace_one(old: str, new: str, label: str):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
+              text = text.replace(old, new, 1)
+
+          replace_one(
+              '''    pub remote_image_urls: Vec<String>,
+              pub timestamp: Option<MessageTimestamp>,
+''',
+              '''    pub remote_image_urls: Vec<String>,
+              pub(crate) spoken: bool,
+              pub timestamp: Option<MessageTimestamp>,
+''',
+              'UserHistoryCell spoken field',
+          )
+
+          replace_one(
+              '''            lines.extend(prefix_message_hyperlink_lines(
+                  wrapped_message,
+                  message_initial_indent("› ".bold().dim(), self.timestamp.as_ref()),
+                  message_subsequent_indent(self.timestamp.as_ref()),
+              ));
+''',
+              '''            lines.extend(prefix_message_hyperlink_lines(
+                  wrapped_message,
+                  message_initial_indent(
+                      if self.spoken {
+                          "› ".red().bold()
+                      } else {
+                          "› ".bold().dim()
+                      },
+                      self.timestamp.as_ref(),
+                  ),
+                  message_subsequent_indent(self.timestamp.as_ref()),
+              ));
+''',
+              'spoken user marker',
+          )
+
+          replace_one(
+              '''    rendered_lines: Option<MarkdownRenderCache>,
+              timestamp: Option<MessageTimestamp>,
+''',
+              '''    rendered_lines: Option<MarkdownRenderCache>,
+              spoken_artifacts: bool,
+              timestamp: Option<MessageTimestamp>,
+''',
+              'AgentMarkdownCell spoken_artifacts field',
+          )
+
+          replace_one(
+              '''    #[cfg(test)]
+              pub(crate) fn new_with_inline_visualizations(
+''',
+              '''    pub(crate) fn new_with_inline_visualizations(
+''',
+              'runtime inline visualization constructor',
+          )
+
+          replace_one(
+              '''            inline_visualization_context,
+              rendered_lines,
+              timestamp,
+          }
+''',
+              '''            inline_visualization_context,
+              rendered_lines,
+              spoken_artifacts: false,
+              timestamp,
+          }
+''',
+              'AgentMarkdownCell constructor field init',
+          )
+
+          replace_one(
+              '''            let lines = crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
+                  &self.markdown_source,
+                  Some(wrap_width),
+                  Some(self.cwd.as_path()),
+                  self.inline_visualization_context.as_ref(),
+              );
+              normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(
+                  lines,
+                  message_initial_indent("• ".dim(), self.timestamp.as_ref()),
+                  message_subsequent_indent(self.timestamp.as_ref()),
+              ))
+''',
+              '''            let lines = crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
+                  &self.markdown_source,
+                  Some(wrap_width),
+                  Some(self.cwd.as_path()),
+                  self.inline_visualization_context.as_ref(),
+              );
+              let lines = if self.spoken_artifacts {
+                  let mut lines = lines;
+                  super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);
+                  lines
+              } else {
+                  lines
+              };
+              normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(
+                  lines,
+                  message_initial_indent("• ".dim(), self.timestamp.as_ref()),
+                  message_subsequent_indent(self.timestamp.as_ref()),
+              ))
+''',
+              'spoken assistant artifact rendering',
+          )
+
+          replace_one(
+              '''        remote_image_urls,
+              timestamp: None,
+          }
+          }
+
+          pub(crate) fn new_timestamped_user_prompt(
+''',
+              '''        remote_image_urls,
+              spoken: false,
+              timestamp: None,
+          }
+          }
+
+          pub(crate) fn new_spoken_user_prompt(message: String) -> UserHistoryCell {
+              let mut cell = new_user_prompt(message, Vec::new(), Vec::new(), Vec::new());
+              cell.spoken = true;
+              cell
+          }
+
+          pub(crate) fn new_timestamped_user_prompt(
+''',
+              'user prompt constructors',
+          )
+
+          path.write_text(text)
           PY
 
           git diff --check
-          git diff -- codex-rs/core/src/tools/handlers/extension_tools.rs
+          git diff -- codex-rs/tui/src/history_cell/messages.rs
 
           git config user.name "freecodex-fix-bot"
           git config user.email "freecodex-fix-bot@users.noreply.github.com"
-          git add codex-rs/core/src/tools/handlers/extension_tools.rs
-          git commit -m "fix(core): pass PathUri to extension permission lookup"
+          git add codex-rs/tui/src/history_cell/messages.rs
+          git commit -m "fix(tui): merge speech cells with message timestamps"
           git push origin HEAD:freecodex
