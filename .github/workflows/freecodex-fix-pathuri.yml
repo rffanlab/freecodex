@@ -20,43 +20,39 @@ jobs:
           ref: freecodex
           fetch-depth: 0
 
-      - name: Patch PathUri compatibility
+      - name: Patch remaining PathUri call site
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('codex-rs/core/src/tools/handlers/mod.rs')
+          path = Path('codex-rs/core/src/tools/handlers/extension_tools.rs')
           text = path.read_text()
-
-          old_import = 'use std::path::Path;\n\n'
-          if old_import not in text:
-              raise SystemExit('expected std::path::Path import not found')
-          text = text.replace(old_import, '', 1)
-
-          old_sig = '''pub(super) async fn apply_granted_turn_permissions(
-              session: &Session,
-              environment: &crate::session::turn_context::TurnEnvironment,
-              cwd: &Path,
-          '''
-          new_sig = '''pub(super) async fn apply_granted_turn_permissions(
-              session: &Session,
-              environment: &TurnEnvironment,
-              cwd: &PathUri,
-          '''
-          if old_sig not in text:
-              raise SystemExit('expected apply_granted_turn_permissions signature not found')
-          text = text.replace(old_sig, new_sig, 1)
-
-          path.write_text(text)
+          old = '''        let additional_permissions = apply_granted_turn_permissions(
+              invocation.session.as_ref(),
+              environment,
+              native_cwd.as_path(),
+              SandboxPermissions::UseDefault,
+              /*additional_permissions*/ None,
+          )'''
+          new = '''        let additional_permissions = apply_granted_turn_permissions(
+              invocation.session.as_ref(),
+              environment,
+              environment.cwd(),
+              SandboxPermissions::UseDefault,
+              /*additional_permissions*/ None,
+          )'''
+          if old not in text:
+              raise SystemExit('expected extension PathUri call site not found')
+          path.write_text(text.replace(old, new, 1))
           PY
 
           git diff --check
-          git diff -- codex-rs/core/src/tools/handlers/mod.rs
+          git diff -- codex-rs/core/src/tools/handlers/extension_tools.rs
 
           git config user.name "freecodex-fix-bot"
           git config user.email "freecodex-fix-bot@users.noreply.github.com"
-          git add codex-rs/core/src/tools/handlers/mod.rs
-          git commit -m "fix(core): align granted permission cwd with PathUri"
+          git add codex-rs/core/src/tools/handlers/extension_tools.rs
+          git commit -m "fix(core): pass PathUri to extension permission lookup"
           git push origin HEAD:freecodex
