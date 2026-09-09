@@ -26,11 +26,10 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path('codex-rs/tui/src/history_cell/messages.rs')
           text = path.read_text()
 
-          def replace_one(old: str, new: str, label: str):
+          def replace_one(old, new, label):
               global text
               count = text.count(old)
               if count != 1:
@@ -38,131 +37,38 @@ jobs:
               text = text.replace(old, new, 1)
 
           replace_one(
-              '''    pub remote_image_urls: Vec<String>,
-              pub timestamp: Option<MessageTimestamp>,
-''',
-              '''    pub remote_image_urls: Vec<String>,
-              pub(crate) spoken: bool,
-              pub timestamp: Option<MessageTimestamp>,
-''',
+              '    pub remote_image_urls: Vec<String>,\n    pub timestamp: Option<MessageTimestamp>,\n',
+              '    pub remote_image_urls: Vec<String>,\n    pub(crate) spoken: bool,\n    pub timestamp: Option<MessageTimestamp>,\n',
               'UserHistoryCell spoken field',
           )
-
           replace_one(
-              '''            lines.extend(prefix_message_hyperlink_lines(
-                  wrapped_message,
-                  message_initial_indent("› ".bold().dim(), self.timestamp.as_ref()),
-                  message_subsequent_indent(self.timestamp.as_ref()),
-              ));
-''',
-              '''            lines.extend(prefix_message_hyperlink_lines(
-                  wrapped_message,
-                  message_initial_indent(
-                      if self.spoken {
-                          "› ".red().bold()
-                      } else {
-                          "› ".bold().dim()
-                      },
-                      self.timestamp.as_ref(),
-                  ),
-                  message_subsequent_indent(self.timestamp.as_ref()),
-              ));
-''',
+              '                message_initial_indent("› ".bold().dim(), self.timestamp.as_ref()),\n',
+              '                message_initial_indent(if self.spoken { "› ".red().bold() } else { "› ".bold().dim() }, self.timestamp.as_ref()),\n',
               'spoken user marker',
           )
-
           replace_one(
-              '''    rendered_lines: Option<MarkdownRenderCache>,
-              timestamp: Option<MessageTimestamp>,
-''',
-              '''    rendered_lines: Option<MarkdownRenderCache>,
-              spoken_artifacts: bool,
-              timestamp: Option<MessageTimestamp>,
-''',
+              '    rendered_lines: Option<MarkdownRenderCache>,\n    timestamp: Option<MessageTimestamp>,\n',
+              '    rendered_lines: Option<MarkdownRenderCache>,\n    spoken_artifacts: bool,\n    timestamp: Option<MessageTimestamp>,\n',
               'AgentMarkdownCell spoken_artifacts field',
           )
-
           replace_one(
-              '''    #[cfg(test)]
-              pub(crate) fn new_with_inline_visualizations(
-''',
-              '''    pub(crate) fn new_with_inline_visualizations(
-''',
+              '    #[cfg(test)]\n    pub(crate) fn new_with_inline_visualizations(\n',
+              '    pub(crate) fn new_with_inline_visualizations(\n',
               'runtime inline visualization constructor',
           )
-
           replace_one(
-              '''            inline_visualization_context,
-              rendered_lines,
-              timestamp,
-          }
-''',
-              '''            inline_visualization_context,
-              rendered_lines,
-              spoken_artifacts: false,
-              timestamp,
-          }
-''',
-              'AgentMarkdownCell constructor field init',
+              '            inline_visualization_context,\n            rendered_lines,\n            timestamp,\n',
+              '            inline_visualization_context,\n            rendered_lines,\n            spoken_artifacts: false,\n            timestamp,\n',
+              'AgentMarkdownCell constructor init',
           )
-
           replace_one(
-              '''            let lines = crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
-                  &self.markdown_source,
-                  Some(wrap_width),
-                  Some(self.cwd.as_path()),
-                  self.inline_visualization_context.as_ref(),
-              );
-              normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(
-                  lines,
-                  message_initial_indent("• ".dim(), self.timestamp.as_ref()),
-                  message_subsequent_indent(self.timestamp.as_ref()),
-              ))
-''',
-              '''            let lines = crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
-                  &self.markdown_source,
-                  Some(wrap_width),
-                  Some(self.cwd.as_path()),
-                  self.inline_visualization_context.as_ref(),
-              );
-              let lines = if self.spoken_artifacts {
-                  let mut lines = lines;
-                  super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);
-                  lines
-              } else {
-                  lines
-              };
-              normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(
-                  lines,
-                  message_initial_indent("• ".dim(), self.timestamp.as_ref()),
-                  message_subsequent_indent(self.timestamp.as_ref()),
-              ))
-''',
+              '            );\n            normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(\n                lines,\n                message_initial_indent("• ".dim(), self.timestamp.as_ref()),\n',
+              '            );\n            let lines = if self.spoken_artifacts {\n                let mut lines = lines;\n                super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);\n                lines\n            } else {\n                lines\n            };\n            normalize_whitespace_only_hyperlink_lines(prefix_message_hyperlink_lines(\n                lines,\n                message_initial_indent("• ".dim(), self.timestamp.as_ref()),\n',
               'spoken assistant artifact rendering',
           )
-
           replace_one(
-              '''        remote_image_urls,
-              timestamp: None,
-          }
-          }
-
-          pub(crate) fn new_timestamped_user_prompt(
-''',
-              '''        remote_image_urls,
-              spoken: false,
-              timestamp: None,
-          }
-          }
-
-          pub(crate) fn new_spoken_user_prompt(message: String) -> UserHistoryCell {
-              let mut cell = new_user_prompt(message, Vec::new(), Vec::new(), Vec::new());
-              cell.spoken = true;
-              cell
-          }
-
-          pub(crate) fn new_timestamped_user_prompt(
-''',
+              '        remote_image_urls,\n        timestamp: None,\n    }\n}\n\npub(crate) fn new_timestamped_user_prompt(\n',
+              '        remote_image_urls,\n        spoken: false,\n        timestamp: None,\n    }\n}\n\npub(crate) fn new_spoken_user_prompt(message: String) -> UserHistoryCell {\n    let mut cell = new_user_prompt(message, Vec::new(), Vec::new(), Vec::new());\n    cell.spoken = true;\n    cell\n}\n\npub(crate) fn new_timestamped_user_prompt(\n',
               'user prompt constructors',
           )
 
@@ -171,7 +77,6 @@ jobs:
 
           git diff --check
           git diff -- codex-rs/tui/src/history_cell/messages.rs
-
           git config user.name "freecodex-fix-bot"
           git config user.email "freecodex-fix-bot@users.noreply.github.com"
           git add codex-rs/tui/src/history_cell/messages.rs
