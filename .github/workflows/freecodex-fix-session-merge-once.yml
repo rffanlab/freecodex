@@ -1,0 +1,115 @@
+name: FreeCodex Fix Session Merge Once
+
+on:
+  push:
+    branches: [freecodex]
+    paths:
+      - .github/workflows/freecodex-fix-session-merge-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: freecodex
+          fetch-depth: 0
+      - name: Repair semantic merge conflict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('codex-rs/core/src/session/mod.rs')
+          text = path.read_text()
+          start = '''                let response = RequestPermissionsResponse {
+                    permissions,
+                    scope,
+                    strict_auto_review: false,
+                },
+                ReviewDecision::NetworkPolicyAmendment {
+                    network_policy_amendment,
+                } => match network_policy_amendment.action {
+                    NetworkPolicyRuleAction::Allow => RequestPermissionsResponse {
+                        permissions: requested_permissions.clone(),
+                        scope: PermissionGrantScope::Turn,
+                        strict_auto_review: false,
+                    },
+                    NetworkPolicyRuleAction::Deny => RequestPermissionsResponse {
+                        permissions: RequestPermissionProfile::default(),
+                        scope: PermissionGrantScope::Turn,
+                        strict_auto_review: false,
+                    },
+                },
+                ReviewDecision::ApprovedMcpPolicyAmendment
+                | ReviewDecision::Abort
+                | ReviewDecision::Denied { .. }
+                | ReviewDecision::TimedOut => RequestPermissionsResponse {
+                    permissions: RequestPermissionProfile::default(),
+                    scope: PermissionGrantScope::Turn,
+                    strict_auto_review: false,
+                },
+            };
+            let response = Self::normalize_request_permissions_response(
+                requested_permissions,
+                response,
+                native_environment_cwd.as_path(),
+            );
+            self.record_granted_request_permissions_for_turn(
+                &response,
+                &environment,
+                originating_turn_state.as_ref(),
+            )
+            .await;
+            return Some(response);
+        }
+'''
+          replacement = '''                let response = RequestPermissionsResponse {
+                    permissions,
+                    scope,
+                    strict_auto_review: false,
+                };
+                let response = Self::normalize_request_permissions_response(
+                    requested_permissions,
+                    response,
+                    &context,
+                );
+                self.record_granted_request_permissions_for_turn(
+                    &response,
+                    &environment.selection,
+                    originating_turn_state.as_ref(),
+                )
+                .await;
+                return Some(response);
+            }
+'''
+          if text.count(start) != 1:
+              raise SystemExit(f'expected one broken merged block, found {text.count(start)}')
+          text = text.replace(start, replacement)
+          text = text.replace(
+              '''                self.record_granted_request_permissions_for_turn(
+                    &response,
+                    &entry.environment,
+                    originating_turn_state.as_ref(),
+                )''',
+              '''                self.record_granted_request_permissions_for_turn(
+                    &response,
+                    &entry.environment.selection,
+                    originating_turn_state.as_ref(),
+                )''',
+              1,
+          )
+          path.write_text(text)
+          PY
+
+          rm .github/workflows/freecodex-fix-session-merge-once.yml
+          git config user.name 'freecodex-fix-bot'
+          git config user.email 'freecodex-fix-bot@users.noreply.github.com'
+          git add codex-rs/core/src/session/mod.rs .github/workflows/freecodex-fix-session-merge-once.yml
+          git commit -m 'fix(core): resolve request permissions merge conflict'
+          git push origin HEAD:freecodex
