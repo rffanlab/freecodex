@@ -744,12 +744,11 @@ async fn persistent_local_actor_approval_bypasses_reviewer() {
         ElicitationRequestRouter::default(),
     );
     let (second_tx_event, second_events) = async_channel::bounded(1);
-    let second_sender =
-        second_manager.make_sender(
-            "local-actor".to_string(),
-            Some(second_tx_event),
-            &ClientMcpExtensions::default(),
-        );
+    let second_sender = second_manager.make_sender(
+        "local-actor".to_string(),
+        Some(second_tx_event),
+        &ClientMcpExtensions::default(),
+    );
     let second_response = second_sender(
         RequestId::Number(2),
         local_actor_elicitation(json!(PERSIST_ALWAYS)),
@@ -843,10 +842,10 @@ async fn policy_denials_take_precedence_over_persistent_local_actor_approval() {
         );
         let (tx_event, events) = async_channel::bounded(1);
         let sender = manager.make_sender(
-        "local-actor".to_string(),
-        Some(tx_event),
-        &ClientMcpExtensions::default(),
-    );
+            "local-actor".to_string(),
+            Some(tx_event),
+            &ClientMcpExtensions::default(),
+        );
         let response = sender(
             RequestId::Number(2),
             local_actor_elicitation(json!(PERSIST_ALWAYS)),
