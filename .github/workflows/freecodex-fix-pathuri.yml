@@ -29,22 +29,10 @@ jobs:
 
           path = Path('codex-rs/core/src/tools/handlers/extension_tools.rs')
           text = path.read_text()
-          old = '''        let additional_permissions = apply_granted_turn_permissions(
-              invocation.session.as_ref(),
-              environment,
-              native_cwd.as_path(),
-              SandboxPermissions::UseDefault,
-              /*additional_permissions*/ None,
-          )'''
-          new = '''        let additional_permissions = apply_granted_turn_permissions(
-              invocation.session.as_ref(),
-              environment,
-              environment.cwd(),
-              SandboxPermissions::UseDefault,
-              /*additional_permissions*/ None,
-          )'''
-          if old not in text:
-              raise SystemExit('expected extension PathUri call site not found')
+          old = '            native_cwd.as_path(),\n'
+          new = '            environment.cwd(),\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one extension PathUri call site, found {text.count(old)}')
           path.write_text(text.replace(old, new, 1))
           PY
 
