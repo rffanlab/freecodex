@@ -58,27 +58,36 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
 
-      - name: Diagnose codex-core tests
+      - name: Verify tracing filter test in isolation
+        shell: bash
+        env:
+          RUST_MIN_STACK: 16777216
+        run: |
+          set -euo pipefail
+          cargo test -p codex-core \
+            session::turn::tests::post_sampling_token_estimate_is_disabled_by_always_on_sinks \
+            -- --exact --nocapture
+
+      - name: Verify full codex-core suite serially
         shell: bash
         env:
           RUST_MIN_STACK: 16777216
         run: |
           set +e
-          cargo test -p codex-core > /tmp/freecodex-core-test.log 2>&1
+          cargo test -p codex-core -- --test-threads=1 > /tmp/freecodex-core-test.log 2>&1
           status=$?
-          echo "===== FREECODEX CORE TEST FAILURES ====="
+          echo "===== FREECODEX SERIAL CORE TEST RESULT ====="
           python3 - <<'PY'
           from pathlib import Path
           lines = Path('/tmp/freecodex-core-test.log').read_text(errors='replace').splitlines()
-          needles = ('FAILED', 'panicked at', 'assertion `', 'assertion failed', 'failures:', 'test result: FAILED', 'left:', 'right:')
+          needles = ('FAILED', 'panicked at', 'assertion `', 'assertion failed', 'failures:', 'test result:', 'left:', 'right:')
           hits = [i for i, line in enumerate(lines) if any(n in line for n in needles)]
-          if not hits:
-              print('NO MATCHED FAILURE BLOCKS; FINAL LOG TAIL:')
-              print('\n'.join(lines[-160:]))
-          else:
+          if status := False:
+              pass
+          if hits:
               ranges = []
               for i in hits:
-                  a, b = max(0, i - 12), min(len(lines), i + 32)
+                  a, b = max(0, i - 10), min(len(lines), i + 28)
                   if ranges and a <= ranges[-1][1] + 2:
                       ranges[-1] = (ranges[-1][0], max(ranges[-1][1], b))
                   else:
@@ -86,6 +95,8 @@ jobs:
               for a, b in ranges[-12:]:
                   print('\n'.join(lines[a:b]))
                   print('-----')
-          print('===== END FREECODEX CORE TEST FAILURES =====')
+          else:
+              print('\n'.join(lines[-160:]))
+          print('===== END FREECODEX SERIAL CORE TEST RESULT =====')
           PY
           exit "$status"
