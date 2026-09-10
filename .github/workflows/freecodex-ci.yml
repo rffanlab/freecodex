@@ -108,7 +108,15 @@ jobs:
       - name: Test codex-core
         env:
           RUST_MIN_STACK: "16777216"
-        run: cargo test -p codex-core
+        shell: bash
+        run: |
+          set -euo pipefail
+          tracing_filter_test="session::turn::tests::post_sampling_token_estimate_is_disabled_by_always_on_sinks"
+          # This upstream test rebuilds tracing's process-global callsite interest cache.
+          # Run the rest of the suite first, then verify that test in a fresh process so
+          # prior tests cannot leak global tracing state into its assertion.
+          cargo test -p codex-core -- --skip "$tracing_filter_test"
+          cargo test -p codex-core --lib "$tracing_filter_test" -- --exact
 
       - name: Full workspace check
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_workspace_check }}
