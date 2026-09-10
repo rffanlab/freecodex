@@ -106,6 +106,8 @@ jobs:
         run: cargo test -p codex-mcp
 
       - name: Test codex-core
+        env:
+          RUST_MIN_STACK: "16777216"
         run: cargo test -p codex-core
 
       - name: Full workspace check
