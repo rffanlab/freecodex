@@ -58,32 +58,34 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
 
-      - name: Diagnose modified core packages
+      - name: Diagnose codex-core tests
         shell: bash
+        env:
+          RUST_MIN_STACK: 16777216
         run: |
           set +e
-          cargo check -p codex-mcp -p codex-core -p codex-cli --all-targets > /tmp/freecodex-check.log 2>&1
+          cargo test -p codex-core > /tmp/freecodex-core-test.log 2>&1
           status=$?
-          echo "===== FREECODEX CURRENT ERRORS ====="
+          echo "===== FREECODEX CORE TEST FAILURES ====="
           python3 - <<'PY'
           from pathlib import Path
-          lines = Path('/tmp/freecodex-check.log').read_text(errors='replace').splitlines()
-          hits = [i for i, line in enumerate(lines) if 'error[E' in line or line.startswith('error:')]
+          lines = Path('/tmp/freecodex-core-test.log').read_text(errors='replace').splitlines()
+          needles = ('FAILED', 'panicked at', 'assertion `', 'assertion failed', 'failures:', 'test result: FAILED', 'left:', 'right:')
+          hits = [i for i, line in enumerate(lines) if any(n in line for n in needles)]
           if not hits:
-              print('NO RUST ERROR BLOCKS FOUND')
+              print('NO MATCHED FAILURE BLOCKS; FINAL LOG TAIL:')
+              print('\n'.join(lines[-160:]))
           else:
               ranges = []
               for i in hits:
-                  a, b = max(0, i - 3), min(len(lines), i + 24)
-                  if ranges and a <= ranges[-1][1]:
+                  a, b = max(0, i - 12), min(len(lines), i + 32)
+                  if ranges and a <= ranges[-1][1] + 2:
                       ranges[-1] = (ranges[-1][0], max(ranges[-1][1], b))
                   else:
                       ranges.append((a, b))
-              for a, b in ranges:
+              for a, b in ranges[-12:]:
                   print('\n'.join(lines[a:b]))
                   print('-----')
-          print('===== END FREECODEX CURRENT ERRORS =====')
+          print('===== END FREECODEX CORE TEST FAILURES =====')
           PY
           exit "$status"
-
-# rerun after extension PathUri fix
